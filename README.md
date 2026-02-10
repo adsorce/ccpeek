@@ -2,8 +2,6 @@
 
 A sleek, fast viewer for Claude Code chat history stored locally on your machine. Browse, search, and export your AI conversations with a beautiful dark interface inspired by Claude's native design.
 
-![ccpeek screenshot](screenshot.png)
-
 ## ✨ Features
 
 ### Core Functionality
@@ -100,7 +98,7 @@ This will:
 
 ### Architecture
 - **Backend**: Python HTTP server with automatic browser launching
-- **Frontend**: Vanilla JavaScript with no dependencies
+- **Frontend**: Vanilla JavaScript with marked.js + highlight.js (CDN)
 - **Storage**: Reads JSONL files from `~/.claude/projects/`
 - **Port Management**: Automatically finds available ports starting from 8888
 
@@ -179,7 +177,6 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ### Ideas for Contribution
 - Add support for other AI chat formats
 - Implement conversation search/filter by date
-- Add syntax highlighting for code blocks
 - Create themes (light mode, custom colors)
 - Add conversation statistics and analytics
 - Implement conversation merging
@@ -198,28 +195,12 @@ This project is open source and available under the [MIT License](LICENSE).
 ## 📊 Stats
 
 - **Language**: Python (backend) + HTML/CSS/JavaScript (frontend)
-- **Dependencies**: None (uses Python standard library only)
+- **Dependencies**: Python standard library (backend), marked.js + highlight.js via CDN (frontend)
 - **Size**: < 50KB total
 - **Performance**: Handles thousands of conversations smoothly
 
 ---
 
 **Note**: This tool is not officially affiliated with Anthropic or Claude. It's a community project designed to enhance the Claude Code experience.
-
-## 📸 Screenshots
-
-### Main Interface
-![Main Interface](screenshots/main.png)
-
-### Search Functionality
-![Search](screenshots/search.png)
-
-### Tool Filtering
-![Filtering](screenshots/filtering.png)
-
-### Export Options
-![Export](screenshots/export.png)
-
----
 
 Made with ❤️ for the Claude Code community

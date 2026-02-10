@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ccpeek - Claude Chat History Viewer</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked-highlight/lib/index.umd.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
         
@@ -376,6 +380,90 @@
             background: none;
             padding: 0;
         }
+
+        /* Markdown-rendered assistant messages */
+        .message-text.markdown {
+            white-space: normal;
+        }
+
+        .message-text.markdown h1,
+        .message-text.markdown h2,
+        .message-text.markdown h3,
+        .message-text.markdown h4 {
+            color: #e3e3e3;
+            margin: 16px 0 8px;
+        }
+
+        .message-text.markdown h1 { font-size: 1.4em; }
+        .message-text.markdown h2 { font-size: 1.2em; }
+        .message-text.markdown h3 { font-size: 1.05em; }
+        .message-text.markdown h4 { font-size: 1em; }
+
+        .message-text.markdown ul,
+        .message-text.markdown ol {
+            padding-left: 24px;
+            margin: 8px 0;
+        }
+
+        .message-text.markdown li {
+            margin: 4px 0;
+        }
+
+        .message-text.markdown blockquote {
+            border-left: 3px solid #4a4a4a;
+            padding-left: 12px;
+            margin: 8px 0;
+            color: #999;
+        }
+
+        .message-text.markdown table {
+            border-collapse: collapse;
+            margin: 12px 0;
+            width: 100%;
+        }
+
+        .message-text.markdown th,
+        .message-text.markdown td {
+            border: 1px solid #3a3a3a;
+            padding: 6px 12px;
+            text-align: left;
+        }
+
+        .message-text.markdown th {
+            background: #1a1a1a;
+            font-weight: 600;
+        }
+
+        .message-text.markdown tr:nth-child(even) {
+            background: #1a1a1a22;
+        }
+
+        .message-text.markdown a {
+            color: #4a9eff;
+            text-decoration: none;
+        }
+
+        .message-text.markdown a:hover {
+            text-decoration: underline;
+        }
+
+        .message-text.markdown hr {
+            border: none;
+            border-top: 1px solid #3a3a3a;
+            margin: 16px 0;
+        }
+
+        .message-text.markdown p {
+            margin: 0 0 8px;
+        }
+
+        .message-text.markdown p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message-text.markdown pre {
+            background: #0d1117;
+        }
         
         .thinking-block {
             background: #1a1f2e;
@@ -650,35 +738,18 @@
                 const response = await fetch(`/api/conversation/${conversationId}`);
                 allMessages = await response.json();
                 renderMessages(allMessages);
-                
-                // Re-apply search highlighting in messages if there's an active search
+
+                // Re-apply search highlighting if there's an active search
                 if (searchTerm) {
-                    // Only update message highlighting, not the sidebar
+                    const container = document.getElementById('messagesContainer');
+                    const matchCount = applySearchHighlights(container, searchTerm);
                     searchResults = [];
-                    allMessages.forEach((msg, msgIndex) => {
-                        if (msg.message && msg.message.content) {
-                            const content = typeof msg.message.content === 'string' 
-                                ? msg.message.content 
-                                : JSON.stringify(msg.message.content);
-                            
-                            const regex = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                            const matches = content.match(regex);
-                            
-                            if (matches) {
-                                matches.forEach(() => {
-                                    searchResults.push({ messageIndex: msgIndex });
-                                });
-                            }
-                        }
-                    });
-                    
+                    for (let i = 0; i < matchCount; i++) searchResults.push({ index: i });
+
                     if (searchResults.length > 0) {
                         currentSearchIndex = 0;
                         updateSearchInfo();
-                        renderMessages(allMessages, searchTerm);
                         scrollToCurrentMatch();
-                    } else {
-                        renderMessages(allMessages, searchTerm);
                     }
                 }
             } catch (error) {
@@ -688,14 +759,14 @@
             }
         }
 
-        function renderMessages(messages, highlightTerm = '') {
+        function renderMessages(messages) {
             const container = document.getElementById('messagesContainer');
-            
+
             const messageHtml = messages.map((msg, index) => {
                 if (msg.type === 'user' && msg.message) {
-                    return renderUserMessage(msg, index, highlightTerm);
+                    return renderUserMessage(msg, index);
                 } else if (msg.type === 'assistant' && msg.message) {
-                    return renderAssistantMessage(msg, index, highlightTerm);
+                    return renderAssistantMessage(msg, index);
                 }
                 return '';
             }).filter(html => html).join('');
@@ -712,46 +783,69 @@
             });
         }
 
-        function highlightText(text, term) {
-            if (!term) return text;
-            
-            const regex = new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-            let matchIndex = 0;
-            return text.replace(regex, (match) => {
-                const isCurrent = matchIndex === currentSearchIndex;
-                matchIndex++;
-                return `<span class="highlight ${isCurrent ? 'current' : ''}" data-match-index="${matchIndex - 1}">${match}</span>`;
+        function applySearchHighlights(container, term) {
+            if (!term) return 0;
+            const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(escapedTerm, 'gi');
+            let matchCount = 0;
+
+            const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+            const textNodes = [];
+            while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+            textNodes.forEach(node => {
+                const text = node.textContent;
+                if (!regex.test(text)) return;
+                regex.lastIndex = 0;
+
+                const fragment = document.createDocumentFragment();
+                let lastIndex = 0;
+                let match;
+                while ((match = regex.exec(text)) !== null) {
+                    if (match.index > lastIndex)
+                        fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                    const span = document.createElement('span');
+                    span.className = 'highlight' + (matchCount === currentSearchIndex ? ' current' : '');
+                    span.dataset.matchIndex = matchCount;
+                    span.textContent = match[0];
+                    fragment.appendChild(span);
+                    matchCount++;
+                    lastIndex = regex.lastIndex;
+                }
+                if (lastIndex < text.length)
+                    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+                node.parentNode.replaceChild(fragment, node);
             });
+            return matchCount;
         }
 
-        function renderUserMessage(msg, index, highlightTerm) {
+        function renderUserMessage(msg, index) {
             let content = '';
             const message = msg.message;
-            
+
             // Check if this is actually a tool result message
             let isToolResult = false;
             if (message.content && Array.isArray(message.content)) {
                 isToolResult = message.content.some(item => item.type === 'tool_result');
             }
-            
+
             // Check if this is a local command message (contains specific tags)
             let isLocalCommand = false;
             if (message.content && typeof message.content === 'string') {
-                isLocalCommand = message.content.includes('<command-name>') || 
+                isLocalCommand = message.content.includes('<command-name>') ||
                                message.content.includes('<local-command-stdout>') ||
                                message.content.includes('Caveat: The messages below were generated by the user while running local commands');
             }
-            
+
             // Skip rendering local command messages entirely
             if (isLocalCommand) {
                 return '';
             }
-            
+
             if (message.content) {
                 if (typeof message.content === 'string') {
-                    content = highlightTerm ? highlightText(escapeHtml(message.content), highlightTerm) : escapeHtml(message.content);
+                    content = escapeHtml(message.content);
                 } else if (Array.isArray(message.content)) {
-                    // If it's a tool result, render it differently
                     if (isToolResult) {
                         content = message.content.map(item => {
                             if (item.type === 'tool_result') {
@@ -761,18 +855,14 @@
                                         <span>Tool Result${item.tool_use_id ? ` (${item.tool_use_id.slice(-8)})` : ''}</span>
                                         <span class="tool-use-toggle">▼</span>
                                     </div>
-                                    <div class="tool-use-content">${highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent}</div>
+                                    <div class="tool-use-content">${toolContent}</div>
                                 </div>`;
                             }
                             return '';
                         }).join('');
                     } else {
-                        // Regular user message with text content
                         content = message.content.map(item => {
-                            if (item.type === 'text') {
-                                const text = escapeHtml(item.text || '');
-                                return highlightTerm ? highlightText(text, highlightTerm) : text;
-                            }
+                            if (item.type === 'text') return escapeHtml(item.text || '');
                             return '';
                         }).join('');
                     }
@@ -813,14 +903,14 @@
             `;
         }
 
-        function renderAssistantMessage(msg, index, highlightTerm) {
+        function renderAssistantMessage(msg, index) {
             let content = '';
             const message = msg.message;
-            
+
             // Check if this message contains tool uses
             let hasToolUse = false;
             let toolName = '';
-            
+
             if (message.content && Array.isArray(message.content)) {
                 const toolUse = message.content.find(item => item.type === 'tool_use');
                 if (toolUse) {
@@ -828,21 +918,19 @@
                     toolName = toolUse.name || 'Tool Use';
                 }
             }
-            
+
             if (message.content) {
                 if (typeof message.content === 'string') {
-                    content = formatMarkdown(escapeHtml(message.content));
-                    if (highlightTerm) content = highlightText(content, highlightTerm);
+                    content = renderMarkdown(message.content);
                 } else if (Array.isArray(message.content)) {
                     content = message.content.map(item => {
                         if (item.type === 'text') {
-                            let text = formatMarkdown(item.text || '');
-                            return highlightTerm ? highlightText(text, highlightTerm) : text;
+                            return renderMarkdown(item.text || '');
                         } else if (item.type === 'thinking') {
                             const thinkingText = escapeHtml(item.thinking || '');
                             return `<div class="thinking-block">
                                 <div class="thinking-header">💭 Thinking</div>
-                                <div>${highlightTerm ? highlightText(thinkingText, highlightTerm) : thinkingText}</div>
+                                <div>${thinkingText}</div>
                             </div>`;
                         } else if (item.type === 'tool_use') {
                             const toolContent = escapeHtml(JSON.stringify(item.input, null, 2));
@@ -851,7 +939,7 @@
                                     <span>${escapeHtml(item.name || 'Tool Use')}</span>
                                     <span class="tool-use-toggle">▶</span>
                                 </div>
-                                <div class="tool-use-content">${highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent}</div>
+                                <div class="tool-use-content">${toolContent}</div>
                             </div>`;
                         }
                         return '';
@@ -874,7 +962,7 @@
                             <div class="message-role">${roleLabel}</div>
                             <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
                         </div>
-                        <div class="message-text">${content}</div>
+                        <div class="message-text markdown">${content}</div>
                         ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
                     </div>
                 </div>
@@ -887,25 +975,41 @@
             return div.innerHTML;
         }
 
-        function formatMarkdown(text) {
-            // Basic markdown formatting
-            let formatted = text;
-            
-            // Code blocks
-            formatted = formatted.replace(/```(\w+)?\n([\s\S]*?)```/g, (match, lang, code) => {
-                return `<pre><code>${code}</code></pre>`;
-            });
-            
-            // Inline code
-            formatted = formatted.replace(/`([^`]+)`/g, '<code>$1</code>');
-            
-            // Bold
-            formatted = formatted.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-            
-            // Italic
-            formatted = formatted.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-            
-            return formatted;
+        // Configure marked.js with highlight.js via marked-highlight extension
+        const markedInstance = (function() {
+            if (typeof globalThis.marked === 'undefined') return null;
+            const { Marked } = globalThis.marked;
+            const highlightExt = typeof globalThis.markedHighlight !== 'undefined'
+                ? globalThis.markedHighlight.markedHighlight({
+                    emptyLangClass: 'hljs',
+                    langPrefix: 'hljs language-',
+                    highlight: function(code, lang) {
+                        if (typeof hljs !== 'undefined') {
+                            if (lang && hljs.getLanguage(lang)) {
+                                return hljs.highlight(code, { language: lang }).value;
+                            }
+                            return hljs.highlightAuto(code).value;
+                        }
+                        return code;
+                    }
+                })
+                : null;
+            const opts = highlightExt ? [highlightExt] : [];
+            const instance = new Marked(...opts);
+            instance.setOptions({ gfm: true, breaks: true });
+            // Open links in new tabs
+            const renderer = { link({ href, title, tokens }) {
+                const text = this.parser.parseInline(tokens);
+                const titleAttr = title ? ` title="${title}"` : '';
+                return `<a href="${href}"${titleAttr} target="_blank" rel="noopener">${text}</a>`;
+            }};
+            instance.use({ renderer });
+            return instance;
+        })();
+
+        function renderMarkdown(text) {
+            if (markedInstance) return markedInstance.parse(text || '');
+            return escapeHtml(text || '');
         }
 
         function toggleSidebar() {
@@ -944,30 +1048,17 @@
             
             // First, search through loaded messages if we have a conversation open
             if (currentConversation && allMessages.length > 0) {
+                renderMessages(allMessages);
+                const container = document.getElementById('messagesContainer');
+                const matchCount = applySearchHighlights(container, searchTerm);
                 searchResults = [];
-                allMessages.forEach((msg, msgIndex) => {
-                    if (msg.message && msg.message.content) {
-                        const content = typeof msg.message.content === 'string' 
-                            ? msg.message.content 
-                            : JSON.stringify(msg.message.content);
-                        
-                        const regex = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                        const matches = content.match(regex);
-                        
-                        if (matches) {
-                            matches.forEach(() => {
-                                searchResults.push({ messageIndex: msgIndex });
-                            });
-                        }
-                    }
-                });
-                
+                for (let i = 0; i < matchCount; i++) searchResults.push({ index: i });
+
                 if (searchResults.length > 0) {
                     searchMatches[currentConversation] = searchResults.length;
                     totalMatches = searchResults.length;
                     currentSearchIndex = 0;
                     updateSearchInfo();
-                    renderMessages(allMessages, searchTerm);
                     scrollToCurrentMatch();
                 }
             }
@@ -997,7 +1088,9 @@
             }
             
             updateSearchInfo();
-            renderMessages(allMessages, searchTerm);
+            renderMessages(allMessages);
+            const container = document.getElementById('messagesContainer');
+            applySearchHighlights(container, searchTerm);
             scrollToCurrentMatch();
         }
 
