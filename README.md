@@ -71,9 +71,9 @@ ccpeek
 ```
 
 This will:
-1. Start a local server on port 8888 (or next available)
-2. Automatically open your default browser
-3. Load all your Claude Code conversations
+1. Check if ccpeek is already running on port 8888
+2. If found, open your browser to the existing server and exit (no duplicate)
+3. Otherwise, start a new server (on port 8888 or next available) and open your browser
 
 ### Viewing Conversations
 - Click any conversation in the sidebar to load it
@@ -133,6 +133,7 @@ ccpeek/
 - `GET /` - Serves the main HTML interface
 - `GET /api/conversations` - Returns list of all conversations with metadata
 - `GET /api/conversation/{id}` - Returns all messages for a specific conversation
+- `GET /api/ping` - Health check / instance fingerprint (returns `{"app":"ccpeek"}`)
 
 ## 🎨 Customization
 
@@ -160,7 +161,7 @@ sudo ln -sf ~/ccpeek/ccpeek /usr/local/bin/ccpeek
 ```
 
 ### Port already in use
-The server automatically finds the next available port. If you're having issues, you can manually specify a different port in `server.py`.
+If ccpeek is already running on the default port, re-running `ccpeek` will detect the existing instance, open your browser to it, and exit — no duplicate server is started. If a *different* application occupies the port, ccpeek falls back to the next available port automatically.
 
 ### No conversations showing
 Ensure you have Claude Code chat history in `~/.claude/projects/`. The tool only shows existing conversations.

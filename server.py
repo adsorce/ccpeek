@@ -9,6 +9,8 @@ import time
 import subprocess
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 from pathlib import Path
 import socket
 import sys
@@ -17,7 +19,12 @@ DEFAULT_PORT = 8888
 DEFAULT_HOST = '127.0.0.1'
 LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 
+class CCPeekServer(HTTPServer):
+    allow_reuse_address = True
+
 class CCPeekHandler(SimpleHTTPRequestHandler):
+    server_version = "CCPeek/1.0"
+
     def do_GET(self):
         parsed_path = urlparse(self.path)
         
@@ -29,6 +36,11 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(f.read())
         elif parsed_path.path == '/api/conversations':
             self.handle_conversations()
+        elif parsed_path.path == '/api/ping':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"app":"ccpeek"}')
         elif parsed_path.path.startswith('/api/conversation/'):
             conversation_id = parsed_path.path.split('/')[-1]
             self.handle_conversation(conversation_id)
@@ -129,10 +141,24 @@ def find_free_port(start_port=DEFAULT_PORT):
     while port < start_port + 100:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 s.bind(('', port))
                 return port
         except OSError:
             port += 1
+    return None
+
+def check_existing_instance(host, port, timeout=1.0):
+    """Check if ccpeek is already running on host:port."""
+    probe_host = '127.0.0.1' if host in {'0.0.0.0', '::'} else host
+    url = f'http://{probe_host}:{port}/api/ping'
+    try:
+        with urlopen(Request(url), timeout=timeout) as resp:
+            data = json.loads(resp.read(256))
+            if data.get('app') == 'ccpeek':
+                return f'http://{probe_host}:{port}'
+    except (URLError, OSError, json.JSONDecodeError, ValueError):
+        pass
     return None
 
 def _is_wsl():
@@ -158,19 +184,11 @@ def open_browser(host, port):
         except FileNotFoundError:
             pass  # cmd.exe not on PATH — fall through
 
-    # Use xdg-open to respect system's default browser
-    try:
-        # Use setsid to detach browser from our process group
-        subprocess.Popen(['setsid', 'xdg-open', url],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True)
-    except:
-        # Fallback to webbrowser module if xdg-open fails
-        try:
-            webbrowser.open(url)
-        except:
-            print(f"Could not auto-open browser. Please visit: {url}")
+    # Native Linux: webbrowser module tries xdg-open, gio, x-www-browser,
+    # firefox, chrome, and more — with start_new_session for process isolation.
+    # Also respects the BROWSER env var for power users.
+    if not webbrowser.open(url):
+        print(f"Could not auto-open browser. Please visit: {url}")
 
 def resolve_display_host(host):
     """Provide a user-facing host string for status messages."""
@@ -213,6 +231,14 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
 
+    existing_url = check_existing_instance(args.host, args.port)
+    if existing_url:
+        print(f"CCPeek is already running at {existing_url}")
+        if args.open_browser and args.host in LOCAL_HOSTS:
+            browser_host = args.host if args.host != 'localhost' else '127.0.0.1'
+            open_browser(browser_host, args.port)
+        sys.exit(0)
+
     host = args.host
     port = find_free_port(args.port)
     if not port:
@@ -220,7 +246,7 @@ def main(argv=None):
         sys.exit(1)
 
     try:
-        httpd = HTTPServer((host, port), CCPeekHandler)
+        httpd = CCPeekServer((host, port), CCPeekHandler)
     except OSError as err:
         print(f"Failed to start server on {host}:{port} -> {err}")
         sys.exit(1)
