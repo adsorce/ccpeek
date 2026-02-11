@@ -71,9 +71,48 @@ ccpeek
 ```
 
 This will:
-1. Start a local server on port 8888 (or next available)
-2. Automatically open your default browser
-3. Load all your Claude Code conversations
+1. On first run, ask if you want ccpeek to start automatically on login (systemd)
+2. Start a local server on port 8888 (or connect to an already-running instance)
+3. Automatically open your default browser
+4. Load all your Claude Code conversations
+
+### First-Run Setup
+
+On the very first launch, ccpeek asks whether to register itself as a systemd user service:
+
+```
+$ ccpeek
+── ccpeek setup ──
+
+Start ccpeek automatically on login via systemd (port 8888)? [y/N] y
+Registered and started ccpeek on port 8888
+Re-run anytime with: ccpeek --setup
+
+ccpeek is already running at http://127.0.0.1:8888
+```
+
+Choosing **N** (the default) skips registration — ccpeek starts a normal foreground server instead:
+
+```
+$ ccpeek
+── ccpeek setup ──
+
+Start ccpeek automatically on login via systemd (port 8888)? [y/N]
+Skipped systemd registration
+Re-run anytime with: ccpeek --setup
+
+CCPeek server starting on http://127.0.0.1:8888
+Press Ctrl+C to stop
+```
+
+Either way, if ccpeek is already running when you type `ccpeek`, it simply opens your browser — no duplicate servers:
+
+```
+$ ccpeek
+ccpeek is already running at http://127.0.0.1:8888
+```
+
+Re-run the setup wizard anytime with `ccpeek --setup`.
 
 ### Viewing Conversations
 - Click any conversation in the sidebar to load it
@@ -102,21 +141,24 @@ This will:
 - **Backend**: Python HTTP server with automatic browser launching
 - **Frontend**: Vanilla JavaScript with no dependencies
 - **Storage**: Reads JSONL files from `~/.claude/projects/`
-- **Port Management**: Automatically finds available ports starting from 8888
+- **Singleton**: Detects running instances and reuses them instead of starting duplicates
 
 ### WSL2 Support
 When running inside WSL2, ccpeek automatically detects the environment and opens your default **Windows** browser via `cmd.exe /c start` instead of `xdg-open`, which avoids silent failures caused by the lack of a controlling TTY in background/daemon contexts.
 
 ### Running as a systemd Service
-If you'd like ccpeek always available at `http://localhost:8888` (great for bookmarking), install it as a systemd user service:
+On first launch, ccpeek will ask if you'd like to register it as a systemd user service that starts automatically on login. You can re-run this prompt anytime:
 
 ```bash
-cp contrib/ccpeek.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now ccpeek.service
+ccpeek --setup
 ```
 
-Check status with `systemctl --user status ccpeek`.
+To manage the service manually:
+```bash
+systemctl --user status ccpeek    # check status
+systemctl --user restart ccpeek   # restart
+systemctl --user disable ccpeek   # stop auto-start
+```
 
 ### File Structure
 ```
@@ -137,10 +179,10 @@ ccpeek/
 ## 🎨 Customization
 
 ### Changing the Port
-Edit `server.py` and modify the `PORT` variable:
-```python
-PORT = 8888  # Change to your preferred port
+```bash
+ccpeek --port 9999
 ```
+Or set it permanently via environment variable: `export CCPEEK_PORT=9999`
 
 ### Modifying the Theme
 All styles are contained in `index.html`. Look for the `<style>` section to customize colors, fonts, and layout.
@@ -160,7 +202,7 @@ sudo ln -sf ~/ccpeek/ccpeek /usr/local/bin/ccpeek
 ```
 
 ### Port already in use
-The server automatically finds the next available port. If you're having issues, you can manually specify a different port in `server.py`.
+If ccpeek detects something already listening on port 8888, it assumes it's an existing instance and opens the browser to it. To use a different port: `ccpeek --port 9999`.
 
 ### No conversations showing
 Ensure you have Claude Code chat history in `~/.claude/projects/`. The tool only shows existing conversations.
