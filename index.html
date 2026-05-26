@@ -862,6 +862,7 @@
         }
 
         function renderConversations(conversations, searchMatches = {}) {
+            selectedConvIndex = 0;
             const container = document.getElementById('conversationsList');
 
             if (conversations.length === 0) {
@@ -918,7 +919,8 @@
             document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
 
             try {
-                const response = await fetch(`/api/conversation/${conversationId}?include_internal=${showInternalThreads}`);
+                const includeInternal = showInternalThreads || !!rawSearchMatches[conversationId];
+                const response = await fetch(`/api/conversation/${conversationId}?include_internal=${includeInternal}`);
                 const data = await response.json();
 
                 // Check for error response from server
@@ -1261,12 +1263,16 @@
             const filteredMatches = {};
 
             for (const [convId, match] of Object.entries(rawSearchMatches)) {
-                // Skip internal threads if not showing them
-                if (match.is_internal && !showInternalThreads) {
+                const thinkingHits = match.thinking_count || 0;
+                const visibleHits = (match.text_count || 0) + thinkingHits;
+
+                // Skip internal threads unless they have user-visible matches
+                // (text or thinking), since thinking is always shown to the user
+                if (match.is_internal && !showInternalThreads && visibleHits === 0) {
                     continue;
                 }
 
-                const totalCount = (match.text_count || 0) + (match.tool_count || 0);
+                const totalCount = visibleHits + (match.tool_count || 0);
                 if (totalCount > 0) {
                     filteredMatches[convId] = {
                         count: totalCount,
@@ -1343,6 +1349,17 @@
                 return;
             }
 
+            // If search found conversations not in allConversations (e.g. internal
+            // threads with thinking matches), re-fetch the full list so they can render
+            const loadedIds = new Set(allConversations.map(c => c.id));
+            const hasMissing = Object.keys(rawSearchMatches).some(id => !loadedIds.has(id));
+            if (hasMissing) {
+                try {
+                    const resp = await fetch('/api/conversations?include_internal=true');
+                    if (resp.ok) allConversations = await resp.json();
+                } catch (e) { /* keep existing list */ }
+            }
+
             // Apply filters and render
             applySearchFilters();
         }
@@ -1365,11 +1382,13 @@
                         content = msgContent
                             .filter(item => {
                                 if (item.type === 'text') return true;
+                                if (item.type === 'thinking') return true;
                                 if (includeTools && (item.type === 'tool_result' || item.type === 'tool_use')) return true;
                                 return false;
                             })
                             .map(item => {
                                 if (item.type === 'text') return item.text || '';
+                                if (item.type === 'thinking') return item.thinking || '';
                                 if (item.type === 'tool_result') return item.content || '';
                                 if (item.type === 'tool_use') return JSON.stringify(item.input || {});
                                 return '';

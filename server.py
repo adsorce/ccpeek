@@ -287,15 +287,16 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps(messages).encode())
 
     def _extract_content_parts(self, content):
-        """Extract text and tool content separately from a message.
+        """Extract text, tool, and thinking content separately from a message.
 
-        Returns: (text_content, tool_content) tuple of strings
+        Returns: (text_content, tool_content, thinking_content) tuple of strings
         """
         text_parts = []
         tool_parts = []
+        thinking_parts = []
 
         if isinstance(content, str):
-            return (content, '')
+            return (content, '', '')
         elif isinstance(content, list):
             for item in content:
                 if isinstance(item, str):
@@ -312,10 +313,13 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             tool_parts.append(json.dumps(result_content))
                     elif item_type == 'tool_use':
                         tool_parts.append(json.dumps(item.get('input', {})))
-            return (' '.join(text_parts), ' '.join(tool_parts))
+                    elif item_type == 'thinking':
+                        thinking_parts.append(str(item.get('thinking', '')))
+            return (' '.join(text_parts), ' '.join(tool_parts),
+                    ' '.join(thinking_parts))
         elif isinstance(content, dict):
-            return ('', json.dumps(content))
-        return (str(content), '')
+            return ('', json.dumps(content), '')
+        return (str(content), '', '')
 
     def _create_snippet(self, text, match_pos, max_len=80):
         """Create a snippet around the match position."""
@@ -376,8 +380,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
                 text_count = 0
                 tool_count = 0
+                thinking_count = 0
                 text_snippet = None
                 tool_snippet = None
+                thinking_snippet = None
                 first_user_title = None
 
                 try:
@@ -397,9 +403,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
                                 if data.get('message') and data['message'].get('content'):
                                     content = data['message']['content']
-                                    text_part, tool_part = self._extract_content_parts(content)
+                                    text_part, tool_part, thinking_part = self._extract_content_parts(content)
 
-                                    # Count and snippet for text content
                                     if text_part:
                                         found = pattern.findall(text_part)
                                         if found:
@@ -409,7 +414,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                                 if match_obj:
                                                     text_snippet = self._create_snippet(text_part, match_obj.start())
 
-                                    # Count and snippet for tool content
                                     if tool_part:
                                         found = pattern.findall(tool_part)
                                         if found:
@@ -419,16 +423,26 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                                 if match_obj:
                                                     tool_snippet = self._create_snippet(tool_part, match_obj.start())
 
+                                    if thinking_part:
+                                        found = pattern.findall(thinking_part)
+                                        if found:
+                                            thinking_count += len(found)
+                                            if thinking_snippet is None:
+                                                match_obj = pattern.search(thinking_part)
+                                                if match_obj:
+                                                    thinking_snippet = self._create_snippet(thinking_part, match_obj.start())
+
                             except (json.JSONDecodeError, TypeError, AttributeError):
                                 continue
 
-                    if text_count > 0 or tool_count > 0:
+                    if text_count > 0 or tool_count > 0 or thinking_count > 0:
                         is_internal = self._is_internal_thread(jsonl_file, first_user_title)
                         matches[conv_id] = {
                             'text_count': text_count,
                             'tool_count': tool_count,
+                            'thinking_count': thinking_count,
                             'is_internal': is_internal,
-                            'snippet': text_snippet or tool_snippet or ''
+                            'snippet': text_snippet or tool_snippet or thinking_snippet or ''
                         }
 
                 except IOError as e:
