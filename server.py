@@ -22,7 +22,29 @@ SETUP_MARKER = os.path.expanduser('~/.config/ccpeek/.setup-done')
 UNIT_PATH = os.path.expanduser('~/.config/systemd/user/ccpeek.service')
 TASK_NAME = 'CCPeek'
 
+def extract_first_text(content, max_len=100):
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = ''
+        for item in content:
+            if isinstance(item, str):
+                text = item
+                break
+            if isinstance(item, dict) and item.get('type') == 'text':
+                text = item.get('text', '')
+                break
+    else:
+        return ''
+    return text[:max_len] + ('...' if len(text) > max_len else '') if text else ''
+
 class CCPeekHandler(SimpleHTTPRequestHandler):
+    def _json_response(self, data, status=200):
+        self.send_response(status)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
     def do_GET(self):
         parsed_path = urlparse(self.path)
 
@@ -33,10 +55,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             with open(os.path.join(os.path.dirname(__file__), 'index.html'), 'rb') as f:
                 self.wfile.write(f.read())
         elif parsed_path.path == '/api/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"service": "ccpeek", "version": "1.0"}).encode())
+            self._json_response({"service": "ccpeek", "version": "1.0"})
         elif parsed_path.path == '/api/conversations':
             query_params = parse_qs(parsed_path.query)
             include_internal = query_params.get('include_internal', ['false'])[0].lower() == 'true'
@@ -52,6 +71,14 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             self.handle_search(unquote(search_term))
         else:
             super().do_GET()
+
+    @staticmethod
+    def _extract_title_from_line(data, current_title=None):
+        if current_title is not None:
+            return current_title
+        if data.get('type') == 'user' and data.get('message'):
+            return extract_first_text(data['message'].get('content', ''))
+        return None
 
     @staticmethod
     def _decode_project_dir(encoded):
@@ -137,20 +164,13 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             stats = os.stat(jsonl_file)
 
                             # Try to find first user message for title
-                            title = "Untitled Conversation"
                             f.seek(0)
+                            title = "Untitled Conversation"
                             for line in f:
                                 msg_data = json.loads(line)
-                                if msg_data.get('type') == 'user' and msg_data.get('message'):
-                                    content = msg_data['message'].get('content', '')
-                                    if isinstance(content, str):
-                                        title = content[:100] + ('...' if len(content) > 100 else '')
-                                    elif isinstance(content, list) and content:
-                                        # Handle array format
-                                        first_content = content[0]
-                                        if isinstance(first_content, dict) and first_content.get('type') == 'text':
-                                            text = first_content.get('text', '')
-                                            title = text[:100] + ('...' if len(text) > 100 else '')
+                                found = self._extract_title_from_line(msg_data)
+                                if found:
+                                    title = found
                                     break
 
                             # Skip internal threads unless requested
@@ -196,10 +216,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         # Sort by modified time (newest first)
         conversations.sort(key=lambda x: x['modified'], reverse=True)
 
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(conversations).encode())
+        self._json_response(conversations)
 
     def handle_conversation(self, conversation_id, include_internal=False):
         """Get messages for a specific conversation"""
@@ -208,10 +225,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
         # Reject IDs with path separators
         if '/' in conversation_id or '\\' in conversation_id:
-            self.send_response(400)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'error': 'Invalid conversation ID'}).encode())
+            self._json_response({'error': 'Invalid conversation ID'}, 400)
             return
 
         # Find the file by exact basename match
@@ -221,13 +235,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 break
 
         if not jsonl_path or not os.path.exists(jsonl_path):
-            self.send_response(404)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                'error': 'Conversation not found',
-                'conversation_id': conversation_id
-            }).encode())
+            self._json_response({'error': 'Conversation not found', 'conversation_id': conversation_id}, 404)
             return
 
         messages = []
@@ -239,52 +247,30 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         data = json.loads(line)
                         messages.append(data)
                         # Capture first user message title for internal check
-                        if first_user_title is None and data.get('type') == 'user':
-                            content = data.get('message', {}).get('content', '')
-                            if isinstance(content, str):
-                                first_user_title = content[:100]
-                            elif isinstance(content, list) and content:
-                                first_item = content[0]
-                                if isinstance(first_item, dict) and first_item.get('type') == 'text':
-                                    first_user_title = first_item.get('text', '')[:100]
+                        first_user_title = self._extract_title_from_line(data, first_user_title)
                     except json.JSONDecodeError:
                         continue
         except PermissionError:
-            self.send_response(503)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
+            self._json_response({
                 'error': 'File is locked (conversation may be active)',
                 'conversation_id': conversation_id,
                 'path': jsonl_path
-            }).encode())
+            }, 503)
             return
         except IOError as e:
-            self.send_response(500)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
+            self._json_response({
                 'error': f'Error reading file: {str(e)}',
                 'conversation_id': conversation_id,
                 'path': jsonl_path
-            }).encode())
+            }, 500)
             return
 
         # Check if this is an internal thread and block access if not requested
         if not include_internal and self._is_internal_thread(jsonl_path, first_user_title):
-            self.send_response(404)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                'error': 'Conversation not found',
-                'conversation_id': conversation_id
-            }).encode())
+            self._json_response({'error': 'Conversation not found', 'conversation_id': conversation_id}, 404)
             return
 
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(messages).encode())
+        self._json_response(messages)
 
     def _extract_content_parts(self, content):
         """Extract text, tool, and thinking content separately from a message.
@@ -358,6 +344,20 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 return True
         return False
 
+    @staticmethod
+    def _build_search_pattern(search_term):
+        normalized = search_term.replace('\\n', '\n')
+        segments = normalized.split('\n')
+        escaped = [re.escape(s) for s in segments]
+        joiner = r'(?:\n|\\n|\s+)'
+        parts = []
+        for i, seg in enumerate(escaped):
+            if seg:
+                parts.append(seg)
+            if i < len(segments) - 1 and (seg or parts):
+                parts.append(joiner)
+        return re.compile(''.join(parts), re.IGNORECASE | re.DOTALL)
+
     def handle_search(self, search_term):
         """Search across all conversations for a term.
 
@@ -365,25 +365,18 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         Returns separate counts for text and tool content for visibility filtering.
         """
         if not search_term or len(search_term) < 2:
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({'matches': {}}).encode())
+            self._json_response({'matches': {}})
             return
 
         claude_dir = os.path.expanduser('~/.claude/projects')
         matches = {}
-        pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+        pattern = self._build_search_pattern(search_term)
 
         if os.path.exists(claude_dir):
             for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
                 conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
-                text_count = 0
-                tool_count = 0
-                thinking_count = 0
-                text_snippet = None
-                tool_snippet = None
-                thinking_snippet = None
+                counts = {'text': 0, 'tool': 0, 'thinking': 0}
+                snippets = {'text': None, 'tool': None, 'thinking': None}
                 first_user_title = None
 
                 try:
@@ -391,74 +384,45 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         for line in f:
                             try:
                                 data = json.loads(line)
-                                # Capture first user message for internal thread check
-                                if first_user_title is None and data.get('type') == 'user':
-                                    content = data.get('message', {}).get('content', '')
-                                    if isinstance(content, str):
-                                        first_user_title = content[:100]
-                                    elif isinstance(content, list) and content:
-                                        first_item = content[0]
-                                        if isinstance(first_item, dict) and first_item.get('type') == 'text':
-                                            first_user_title = first_item.get('text', '')[:100]
+                                first_user_title = self._extract_title_from_line(data, first_user_title)
 
                                 if data.get('message') and data['message'].get('content'):
-                                    content = data['message']['content']
-                                    text_part, tool_part, thinking_part = self._extract_content_parts(content)
-
-                                    if text_part:
-                                        found = pattern.findall(text_part)
+                                    parts = zip(
+                                        ('text', 'tool', 'thinking'),
+                                        self._extract_content_parts(data['message']['content']))
+                                    for key, part in parts:
+                                        if not part:
+                                            continue
+                                        found = pattern.findall(part)
                                         if found:
-                                            text_count += len(found)
-                                            if text_snippet is None:
-                                                match_obj = pattern.search(text_part)
-                                                if match_obj:
-                                                    text_snippet = self._create_snippet(text_part, match_obj.start())
-
-                                    if tool_part:
-                                        found = pattern.findall(tool_part)
-                                        if found:
-                                            tool_count += len(found)
-                                            if tool_snippet is None:
-                                                match_obj = pattern.search(tool_part)
-                                                if match_obj:
-                                                    tool_snippet = self._create_snippet(tool_part, match_obj.start())
-
-                                    if thinking_part:
-                                        found = pattern.findall(thinking_part)
-                                        if found:
-                                            thinking_count += len(found)
-                                            if thinking_snippet is None:
-                                                match_obj = pattern.search(thinking_part)
-                                                if match_obj:
-                                                    thinking_snippet = self._create_snippet(thinking_part, match_obj.start())
+                                            counts[key] += len(found)
+                                            if snippets[key] is None:
+                                                m = pattern.search(part)
+                                                if m:
+                                                    snippets[key] = self._create_snippet(part, m.start())
 
                             except (json.JSONDecodeError, TypeError, AttributeError):
                                 continue
 
-                    if text_count > 0 or tool_count > 0 or thinking_count > 0:
-                        is_internal = self._is_internal_thread(jsonl_file, first_user_title)
+                    if any(counts.values()):
                         matches[conv_id] = {
-                            'text_count': text_count,
-                            'tool_count': tool_count,
-                            'thinking_count': thinking_count,
-                            'is_internal': is_internal,
-                            'snippet': text_snippet or tool_snippet or thinking_snippet or ''
+                            'text_count': counts['text'],
+                            'tool_count': counts['tool'],
+                            'thinking_count': counts['thinking'],
+                            'is_internal': self._is_internal_thread(jsonl_file, first_user_title),
+                            'snippet': snippets['text'] or snippets['tool'] or snippets['thinking'] or ''
                         }
 
                 except IOError as e:
                     print(f"Error reading {jsonl_file}: {e}")
 
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps({'matches': matches}).encode())
+        self._json_response({'matches': matches})
 
     def log_message(self, format, *args):
         # Suppress request logging
         pass
 
 def is_port_in_use(host, port):
-    """Check if something is already listening on host:port."""
     try:
         with socket.create_connection((host, port), timeout=1):
             return True
@@ -482,7 +446,6 @@ def verify_ccpeek_instance(host, port):
         conn.close()
 
 def find_free_port(start_port=DEFAULT_PORT):
-    """Find a free port starting from start_port."""
     port = start_port
     while port < start_port + 100:
         try:
@@ -494,7 +457,6 @@ def find_free_port(start_port=DEFAULT_PORT):
     return None
 
 def _is_wsl():
-    """Detect if running inside WSL."""
     try:
         with open('/proc/version', 'r') as f:
             return 'microsoft' in f.read().lower()
@@ -547,18 +509,15 @@ def resolve_display_host(host):
             return host
 
 def get_ccpeek_bin():
-    """Resolve the absolute path to the ccpeek executable."""
     found = shutil.which('ccpeek')
     if found:
         return os.path.realpath(found)
     return os.path.abspath(sys.argv[0])
 
 def is_setup_done():
-    """Check if the first-time setup wizard has already run."""
     return os.path.exists(SETUP_MARKER)
 
 def mark_setup_done():
-    """Write the marker file so the wizard doesn't repeat."""
     os.makedirs(os.path.dirname(SETUP_MARKER), exist_ok=True)
     Path(SETUP_MARKER).touch()
 
@@ -646,14 +605,7 @@ def _setup_firewall_rule(port, interactive=False):
 
 
 def _remove_firewall_rule():
-    """Remove the ccpeek Windows Firewall rule if it exists."""
-    result = subprocess.run(
-        ['powershell', '-NoProfile', '-Command',
-         f"Get-NetFirewallRule -DisplayName '{FIREWALL_RULE_NAME}' "
-         f"-ErrorAction SilentlyContinue"],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0 and FIREWALL_RULE_NAME in result.stdout:
+    if _firewall_rule_exists():
         _run_ps_elevated(
             f"Remove-NetFirewallRule -DisplayName '{FIREWALL_RULE_NAME}'"
         )
@@ -661,12 +613,75 @@ def _remove_firewall_rule():
 
 
 def run_remove():
-    """Remove the background service registration."""
     if sys.platform == 'win32':
         _setup_windows_task(0, False)
         _remove_firewall_rule()
     else:
         _setup_systemd_service(0, False)
+
+
+def run_restart():
+    if sys.platform == 'win32':
+        result = subprocess.run(
+            ['schtasks', '/query', '/tn', TASK_NAME],
+            capture_output=True
+        )
+        if result.returncode == 0:
+            subprocess.run(
+                ['schtasks', '/end', '/tn', TASK_NAME],
+                capture_output=True
+            )
+            time.sleep(1)
+            subprocess.run(
+                ['schtasks', '/run', '/tn', TASK_NAME],
+                capture_output=True
+            )
+            time.sleep(2)
+            print(f"Restarted scheduled task '{TASK_NAME}'")
+            return True
+    else:
+        if os.path.exists(UNIT_PATH):
+            try:
+                subprocess.run(
+                    ['systemctl', '--user', 'restart', 'ccpeek'],
+                    check=True
+                )
+                time.sleep(1)
+                print("Restarted ccpeek systemd service")
+                return True
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                pass
+
+    # No task/service found; kill any running ccpeek process and note it
+    killed = False
+    for proc_file in glob.glob('/proc/*/cmdline'):
+        try:
+            with open(proc_file, 'rb') as f:
+                cmdline = f.read().decode('utf-8', errors='replace')
+            if 'server.py' in cmdline and 'ccpeek' in cmdline.lower():
+                pid = int(proc_file.split('/')[2])
+                if pid != os.getpid():
+                    os.kill(pid, 15)
+                    killed = True
+        except (OSError, ValueError):
+            pass
+
+    if not killed and sys.platform == 'win32':
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             "Get-CimInstance Win32_Process -Filter "
+             "\"Name='pythonw.exe' OR Name='python.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'server\\.py' } | "
+             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"],
+            capture_output=True
+        )
+        killed = result.returncode == 0
+
+    if killed:
+        print("Stopped running ccpeek process (no task/service found to restart)")
+    else:
+        print("No ccpeek task, service, or process found")
+    return False
 
 
 def _setup_systemd_service(port, enable):
@@ -823,6 +838,7 @@ def main(argv=None):
     parser.add_argument('--no-browser', dest='open_browser', action='store_false', help='Do not launch a browser window')
     parser.add_argument('--setup', action='store_true', help='Register as a background service')
     parser.add_argument('--remove', action='store_true', help='Unregister the background service')
+    parser.add_argument('--restart', action='store_true', help='Restart the background service')
     parser.set_defaults(open_browser=default_open_browser)
 
     args = parser.parse_args(argv)
@@ -833,22 +849,17 @@ def main(argv=None):
         run_remove()
         sys.exit(0)
 
+    # --restart: restart the background service and exit
+    if args.restart:
+        run_restart()
+        sys.exit(0)
+
     # Setup wizard: on --setup or first interactive launch
     systemd_started = False
     if args.setup or (not is_setup_done() and sys.stdin.isatty()):
         systemd_started = run_setup(args.port)
 
-    # If systemd started successfully, check if it's running and exit
-    if systemd_started:
-        if is_port_in_use(host, args.port) and verify_ccpeek_instance(host, args.port):
-            display_host = resolve_display_host(host)
-            print(f"ccpeek is already running at http://{display_host}:{args.port}")
-            if args.open_browser and host in LOCAL_HOSTS:
-                open_browser(host if host != 'localhost' else '127.0.0.1', args.port)
-            sys.exit(0)
-        # systemd claimed to start but port not in use - fall through to foreground
-
-    # If an instance is already listening, verify it's ccpeek before redirecting
+    # If ccpeek is already listening on the target port, reuse it
     if is_port_in_use(host, args.port):
         if verify_ccpeek_instance(host, args.port):
             display_host = resolve_display_host(host)
@@ -856,7 +867,7 @@ def main(argv=None):
             if args.open_browser and host in LOCAL_HOSTS:
                 open_browser(host if host != 'localhost' else '127.0.0.1', args.port)
             sys.exit(0)
-        else:
+        elif not systemd_started:
             # Port in use by another service - find a free port
             args.port = find_free_port(args.port + 1)
             if args.port is None:

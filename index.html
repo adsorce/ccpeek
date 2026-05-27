@@ -8,11 +8,8 @@
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
         
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -33,7 +30,7 @@
         /* Row 1: top bar spans full width */
         .top-bar {
             grid-column: 1 / -1;
-            height: 56px;
+            min-height: 56px;
             background: #171717;
             border-bottom: 1px solid #2a2a2a;
             display: flex;
@@ -119,9 +116,6 @@
         .conversation-title {
             font-size: 14px;
             margin-bottom: 4px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
 
         .conversation-meta {
@@ -145,9 +139,6 @@
             font-size: 12px;
             color: #888;
             margin: 4px 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
 
         .conv-header {
@@ -202,11 +193,6 @@
             border-color: #3a3a3a;
         }
 
-        .resume-bar-cmd-text {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
 
         .resume-bar-copy {
             flex-shrink: 0;
@@ -243,7 +229,7 @@
             max-width: 600px;
         }
 
-        .global-search input {
+        .global-search textarea {
             width: 100%;
             padding: 10px 16px;
             padding-right: 140px;
@@ -252,6 +238,16 @@
             border-radius: 8px;
             color: #e3e3e3;
             font-size: 14px;
+            font-family: inherit;
+            resize: none;
+            overflow: hidden;
+            min-height: 40px;
+            line-height: 1.4;
+            field-sizing: content;
+            max-height: 120px;
+            overflow-y: auto;
+            display: block;
+            margin: 5px 0;
         }
 
         .header-title {
@@ -259,9 +255,6 @@
             min-width: 0;
             font-size: 14px;
             font-weight: 600;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
         
         .search-controls {
@@ -295,7 +288,7 @@
             display: block;
         }
 
-        .global-search input:focus {
+        .global-search textarea:focus {
             outline: none;
             border-color: #4a4a4a;
             background: #0e0e0e;
@@ -689,7 +682,7 @@
 
         /* ── Narrow ── */
         @media (max-width: 800px) {
-            .global-search input { padding-right: 40px; }
+            .global-search textarea { padding-right: 40px; }
             .search-info { display: none !important; }
             .show-hide-prefix { display: none; }
         }
@@ -720,7 +713,7 @@
 
             .global-search { max-width: none; }
 
-            .global-search input { font-size: 16px; }
+            .global-search textarea { font-size: 16px; }
 
             /* Hide desktop-only buttons on mobile */
             #filterBtn, #exportBtn {
@@ -765,7 +758,7 @@
             </div>
             <div class="top-bar-controls">
                 <div class="global-search">
-                    <input type="text" id="globalSearch" placeholder="Search everything... (Press '/' to focus)">
+                    <textarea id="globalSearch" rows="1" placeholder="Search everything... (Press '/' to focus)"></textarea>
                     <div class="search-controls">
                         <button class="clear-search" id="clearSearch" onclick="clearSearch()">✕</button>
                         <div class="search-info" id="searchInfo">
@@ -802,7 +795,7 @@
                         <path d="M19 12H5M12 19l-7-7 7-7"/>
                     </svg>
                 </button>
-                <span class="header-title" id="headerTitle"></span>
+                <span class="header-title truncate" id="headerTitle"></span>
                 <button class="action-btn" onclick="toggleFilter()" id="filterBtnMobile" style="display: none;">
                     <span id="filterIconMobile">🔽</span> Tools
                 </button>
@@ -810,7 +803,7 @@
             <div class="resume-bar" id="resumeBar">
                 <span class="resume-bar-label" id="resumeBarLabel">To resume:</span>
                 <div class="resume-bar-cmd" id="resumeCmd" onclick="copyResumeCommand()">
-                    <span class="resume-bar-cmd-text" id="resumeCmdText"></span>
+                    <span class="resume-bar-cmd-text truncate" id="resumeCmdText"></span>
                     <span class="resume-bar-copy" id="resumeCopyIcon">✂</span>
                     <span class="resume-bar-copy-label" id="resumeCopyLabel"></span>
                 </div>
@@ -827,7 +820,7 @@
 
     <div class="shortcuts-help" id="shortcutsHelp">
         <strong>Keyboard Shortcuts:</strong><br>
-        / - Search<br>
+        / - Search (Shift+Enter for newline)<br>
         Esc - Clear search<br>
         j/k - Navigate chats<br>
         Enter - Open chat<br>
@@ -882,8 +875,8 @@
                     <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
                          data-id="${conv.id}"
                          onclick="loadConversation('${conv.id}')">
-                        <div class="conversation-title">${escapeHtml(conv.title)}</div>
-                        ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? escapeHtml(snippet).replace(new RegExp(`(${searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'), '<span class="highlight">$1</span>') : escapeHtml(snippet)}</div>` : ''}
+                        <div class="conversation-title truncate">${escapeHtml(conv.title)}</div>
+                        ${hasMatches && snippet ? `<div class="match-snippet truncate">${searchTerm ? escapeHtml(snippet).replace(new RegExp(`(${searchTermToPattern(searchTerm)})`, 'gis'), '<span class="highlight">$1</span>') : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
                             ${hasMatches ? `<span class="match-count">${matchCount} matches</span>` : ''}
@@ -951,14 +944,9 @@
 
         function renderMessages(messages, highlightTerm = '') {
             const container = document.getElementById('messagesContainer');
-            
+
             const messageHtml = messages.map((msg, index) => {
-                if (msg.type === 'user' && msg.message) {
-                    return renderUserMessage(msg, index, highlightTerm);
-                } else if (msg.type === 'assistant' && msg.message) {
-                    return renderAssistantMessage(msg, index, highlightTerm);
-                }
-                return '';
+                return renderMessage(msg, index, highlightTerm);
             }).filter(html => html).join('');
 
             container.innerHTML = messageHtml || '<div class="empty-state"><p>No messages in this conversation</p></div>';
@@ -973,10 +961,24 @@
             });
         }
 
+        function searchTermToPattern(term) {
+            const normalized = term.replace(/\\n/g, '\n');
+            const segments = normalized.split('\n');
+            const escaped = segments.map(escapeRegex);
+            const joiner = '(?:\\n|\\\\n|\\s+)';
+            const parts = [];
+            for (let i = 0; i < escaped.length; i++) {
+                if (escaped[i]) parts.push(escaped[i]);
+                if (i < segments.length - 1 && (escaped[i] || parts.length))
+                    parts.push(joiner);
+            }
+            return parts.join('');
+        }
+
         function highlightText(text, term) {
             if (!term) return text;
-            
-            const regex = new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+
+            const regex = new RegExp(`(${searchTermToPattern(term)})`, 'gis');
             let matchIndex = 0;
             return text.replace(regex, (match) => {
                 const isCurrent = matchIndex === currentSearchIndex;
@@ -985,147 +987,114 @@
             });
         }
 
-        function renderUserMessage(msg, index, highlightTerm) {
-            let content = '';
+        function classifyMessage(msg) {
             const message = msg.message;
-            
-            // Check if this is actually a tool result message
+            const content = message?.content;
+            const isUser = msg.type === 'user';
+
             let isToolResult = false;
-            if (message.content && Array.isArray(message.content)) {
-                isToolResult = message.content.some(item => item.type === 'tool_result');
-            }
-            
-            // Check if this is a local command message (contains specific tags)
+            let isToolUse = false;
+            let toolName = '';
             let isLocalCommand = false;
-            if (message.content && typeof message.content === 'string') {
-                isLocalCommand = message.content.includes('<command-name>') || 
-                               message.content.includes('<local-command-stdout>') ||
-                               message.content.includes('Caveat: The messages below were generated by the user while running local commands');
+
+            if (isUser && typeof content === 'string') {
+                isLocalCommand = content.includes('<command-name>') ||
+                    content.includes('<local-command-stdout>') ||
+                    content.includes('Caveat: The messages below were generated by the user while running local commands');
             }
-            
-            // Skip rendering local command messages entirely
-            if (isLocalCommand) {
-                return '';
-            }
-            
-            if (message.content) {
-                if (typeof message.content === 'string') {
-                    let text = linkifyUrls(escapeHtml(message.content));
-                    content = highlightTerm ? highlightText(text, highlightTerm) : text;
-                } else if (Array.isArray(message.content)) {
-                    // If it's a tool result, render it differently
-                    if (isToolResult) {
-                        content = message.content.map(item => {
-                            if (item.type === 'tool_result') {
-                                const toolContent = escapeHtml(item.content || '');
-                                return `<div class="tool-use"><div class="tool-use-header"><span>Tool Result${item.tool_use_id ? ` (${item.tool_use_id.slice(-8)})` : ''}</span><span class="tool-use-toggle">▼</span></div><div class="tool-use-content">${highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent}</div></div>`;
-                            }
-                            return '';
-                        }).join('');
-                    } else {
-                        // Regular user message with text content
-                        content = message.content.map(item => {
-                            if (item.type === 'text') {
-                                const text = linkifyUrls(escapeHtml(item.text || ''));
-                                return highlightTerm ? highlightText(text, highlightTerm) : text;
-                            }
-                            return '';
-                        }).join('');
-                    }
+            if (Array.isArray(content)) {
+                isToolResult = isUser && content.some(item => item.type === 'tool_result');
+                const toolUseItem = !isUser && content.find(item => item.type === 'tool_use');
+                if (toolUseItem) {
+                    isToolUse = true;
+                    toolName = toolUseItem.name || 'Tool Use';
                 }
             }
 
-            const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
-
-            // Tool results get a different avatar and role
-            if (isToolResult) {
-                return `
-                    <div class="message tool-result ${filterToolsEnabled ? 'tool-filtered' : ''}" data-message-index="${index}" data-is-tool="true">
-                        <div class="message-avatar" style="background: transparent; font-size: 20px;">📤</div>
-                        <div class="message-content">
-                            <div class="message-header">
-                                <div class="message-role">Tool Result</div>
-                                <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
-                            </div>
-                            <div class="message-text">${content}</div>
-                            ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
-                        </div>
-                    </div>
-                `;
-            }
-
-            return `
-                <div class="message user" data-message-index="${index}">
-                    <div class="message-avatar">U</div>
-                    <div class="message-content">
-                        <div class="message-header">
-                            <div class="message-role">User</div>
-                            <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
-                        </div>
-                        <div class="message-text">${content}</div>
-                        ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
-                    </div>
-                </div>
-            `;
+            return { isUser, isToolResult, isToolUse, toolName, isLocalCommand };
         }
 
-        function renderAssistantMessage(msg, index, highlightTerm) {
-            let content = '';
-            const message = msg.message;
-            
-            // Check if this message contains tool uses
-            let hasToolUse = false;
-            let toolName = '';
-            
-            if (message.content && Array.isArray(message.content)) {
-                const toolUse = message.content.find(item => item.type === 'tool_use');
-                if (toolUse) {
-                    hasToolUse = true;
-                    toolName = toolUse.name || 'Tool Use';
-                }
-            }
-            
-            if (message.content) {
-                if (typeof message.content === 'string') {
-                    content = formatMarkdown(escapeHtml(message.content));
-                    if (highlightTerm) content = highlightText(content, highlightTerm);
-                } else if (Array.isArray(message.content)) {
-                    content = message.content.map(item => {
-                        if (item.type === 'text') {
-                            let text = formatMarkdown(escapeHtml(item.text || ''));
-                            return highlightTerm ? highlightText(text, highlightTerm) : text;
-                        } else if (item.type === 'thinking') {
-                            const thinkingText = escapeHtml(item.thinking || '');
-                            return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div>${highlightTerm ? highlightText(thinkingText, highlightTerm) : thinkingText}</div></div>`;
-                        } else if (item.type === 'tool_use') {
-                            const toolContent = escapeHtml(JSON.stringify(item.input, null, 2));
-                            return `<div class="tool-use collapsed"><div class="tool-use-header"><span>${escapeHtml(item.name || 'Tool Use')}</span><span class="tool-use-toggle">▶</span></div><div class="tool-use-content">${highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent}</div></div>`;
-                        }
-                        return '';
-                    }).join('');
-                }
+        function formatContent(msg, meta, highlightTerm) {
+            const content = msg.message?.content;
+            if (!content) return '';
+
+            if (meta.isToolResult && Array.isArray(content)) {
+                return content.map(item => {
+                    if (item.type !== 'tool_result') return '';
+                    const toolContent = escapeHtml(item.content || '');
+                    const highlighted = highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent;
+                    return `<div class="tool-use"><div class="tool-use-header"><span>Tool Result${item.tool_use_id ? ` (${item.tool_use_id.slice(-8)})` : ''}</span><span class="tool-use-toggle">▼</span></div><div class="tool-use-content">${highlighted}</div></div>`;
+                }).join('');
             }
 
+            if (typeof content === 'string') {
+                const processed = meta.isUser
+                    ? linkifyUrls(escapeHtml(content))
+                    : formatMarkdown(escapeHtml(content));
+                return highlightTerm ? highlightText(processed, highlightTerm) : processed;
+            }
+
+            if (Array.isArray(content)) {
+                return content.map(item => {
+                    if (item.type === 'text') {
+                        const text = meta.isUser
+                            ? linkifyUrls(escapeHtml(item.text || ''))
+                            : formatMarkdown(escapeHtml(item.text || ''));
+                        return highlightTerm ? highlightText(text, highlightTerm) : text;
+                    }
+                    if (item.type === 'thinking') {
+                        const t = escapeHtml(item.thinking || '');
+                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div>${highlightTerm ? highlightText(t, highlightTerm) : t}</div></div>`;
+                    }
+                    if (item.type === 'tool_use') {
+                        const tc = escapeHtml(JSON.stringify(item.input, null, 2));
+                        return `<div class="tool-use collapsed"><div class="tool-use-header"><span>${escapeHtml(item.name || 'Tool Use')}</span><span class="tool-use-toggle">▶</span></div><div class="tool-use-content">${highlightTerm ? highlightText(tc, highlightTerm) : tc}</div></div>`;
+                    }
+                    return '';
+                }).join('');
+            }
+            return '';
+        }
+
+        function renderMessage(msg, index, highlightTerm) {
+            if (!msg.message) return '';
+            const meta = classifyMessage(msg);
+            if (meta.isLocalCommand) return '';
+
+            const content = formatContent(msg, meta, highlightTerm);
+            const isTool = meta.isToolResult || meta.isToolUse;
             const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
 
-            // Use wrench emoji for tool uses, Claude avatar for regular messages
-            const avatar = hasToolUse ? '🔧' : 'C';
-            const avatarStyle = hasToolUse ? 'background: transparent; font-size: 20px;' : '';
-            const roleLabel = hasToolUse ? toolName : 'Claude';
+            let avatar, avatarStyle, roleLabel, cssClass;
+            if (meta.isToolResult) {
+                avatar = '📤'; avatarStyle = 'background: transparent; font-size: 20px;';
+                roleLabel = 'Tool Result'; cssClass = 'tool-result';
+            } else if (meta.isToolUse) {
+                avatar = '🔧'; avatarStyle = 'background: transparent; font-size: 20px;';
+                roleLabel = meta.toolName; cssClass = 'assistant';
+            } else if (meta.isUser) {
+                avatar = 'U'; avatarStyle = '';
+                roleLabel = 'User'; cssClass = 'user';
+            } else {
+                avatar = 'C'; avatarStyle = '';
+                roleLabel = 'Claude'; cssClass = 'assistant';
+            }
+
+            const filterClass = isTool && filterToolsEnabled ? 'tool-filtered' : '';
 
             return `
-                <div class="message assistant ${hasToolUse ? (filterToolsEnabled ? 'tool-filtered' : '') : ''}" data-message-index="${index}" data-is-tool="${hasToolUse}">
-                    <div class="message-avatar" ${avatarStyle ? `style="${avatarStyle}"` : ''}>${avatar}</div>
-                    <div class="message-content">
-                        <div class="message-header">
-                            <div class="message-role">${roleLabel}</div>
-                            <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
-                        </div>
-                        <div class="message-text">${content}</div>
-                        ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
-                    </div>
+        <div class="message ${cssClass} ${filterClass}" data-message-index="${index}" data-is-tool="${isTool}">
+            <div class="message-avatar" ${avatarStyle ? `style="${avatarStyle}"` : ''}>${avatar}</div>
+            <div class="message-content">
+                <div class="message-header">
+                    <div class="message-role">${roleLabel}</div>
+                    <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
                 </div>
-            `;
+                <div class="message-text">${content}</div>
+                ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
+            </div>
+        </div>
+    `;
         }
 
         function closeOpenCodeFences(text) {
@@ -1141,6 +1110,27 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+
+        function escapeRegex(str) {
+            return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function getTextContent(content) {
+            if (typeof content === 'string') return content;
+            if (!Array.isArray(content)) return '';
+            return content
+                .filter(item => item.type === 'text')
+                .map(item => item.text || '')
+                .join('');
+        }
+
+        function updateToggleUI(iconIds, textId, isActive, activeIcon, inactiveIcon) {
+            (Array.isArray(iconIds) ? iconIds : [iconIds]).forEach(id => {
+                document.getElementById(id).textContent = isActive ? activeIcon : inactiveIcon;
+            });
+            const prefix = document.getElementById(textId)?.querySelector('.show-hide-prefix');
+            if (prefix) prefix.textContent = isActive ? 'Hide ' : 'Show ';
         }
 
         function linkifyUrls(html) {
@@ -1316,13 +1306,7 @@
         async function performSearch(term) {
             searchTerm = term.toLowerCase();
 
-            // Show/hide clear button
-            const clearBtn = document.getElementById('clearSearch');
-            if (searchTerm) {
-                clearBtn.classList.add('show');
-            } else {
-                clearBtn.classList.remove('show');
-            }
+            document.getElementById('clearSearch').classList.toggle('show', !!searchTerm);
 
             if (!searchTerm) {
                 rawSearchMatches = {};
@@ -1372,40 +1356,28 @@
             searchResults = [];
             const includeTools = !filterToolsEnabled;
 
+            const regex = new RegExp(searchTermToPattern(searchTerm), 'gis');
+
             allMessages.forEach((msg, msgIndex) => {
-                if (msg.message && msg.message.content) {
-                    let content = '';
-                    const msgContent = msg.message.content;
-                    if (typeof msgContent === 'string') {
-                        content = msgContent;
-                    } else if (Array.isArray(msgContent)) {
-                        content = msgContent
-                            .filter(item => {
-                                if (item.type === 'text') return true;
-                                if (item.type === 'thinking') return true;
-                                if (includeTools && (item.type === 'tool_result' || item.type === 'tool_use')) return true;
-                                return false;
-                            })
-                            .map(item => {
-                                if (item.type === 'text') return item.text || '';
-                                if (item.type === 'thinking') return item.thinking || '';
-                                if (item.type === 'tool_result') return item.content || '';
-                                if (item.type === 'tool_use') return JSON.stringify(item.input || {});
-                                return '';
-                            })
-                            .join(' ');
-                    }
+                const msgContent = msg.message?.content;
+                if (!msgContent) return;
 
-                    if (!content) return;
+                let content = '';
+                if (typeof msgContent === 'string') {
+                    content = msgContent;
+                } else if (Array.isArray(msgContent)) {
+                    content = msgContent.reduce((acc, item) => {
+                        if (item.type === 'text') return acc + ' ' + (item.text || '');
+                        if (item.type === 'thinking') return acc + ' ' + (item.thinking || '');
+                        if (includeTools && item.type === 'tool_result') return acc + ' ' + (item.content || '');
+                        if (includeTools && item.type === 'tool_use') return acc + ' ' + JSON.stringify(item.input || {});
+                        return acc;
+                    }, '');
+                }
 
-                    const regex = new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                    const matches = content.match(regex);
-
-                    if (matches) {
-                        matches.forEach(() => {
-                            searchResults.push({ messageIndex: msgIndex });
-                        });
-                    }
+                const matches = content.match(regex);
+                if (matches) {
+                    for (let i = 0; i < matches.length; i++) searchResults.push({ messageIndex: msgIndex });
                 }
             });
 
@@ -1465,7 +1437,7 @@
         function copyMessage(btn, messageIndex) {
             const msg = allMessages[messageIndex];
             let textToCopy = '';
-            
+
             if (msg.message && msg.message.content) {
                 if (typeof msg.message.content === 'string') {
                     textToCopy = msg.message.content;
@@ -1491,53 +1463,34 @@
 
         function exportConversation() {
             if (!currentConversation || !allMessages.length) return;
-            
+
             let markdown = `# Conversation Export\n\n`;
             markdown += `**Date:** ${new Date().toLocaleString()}\n\n---\n\n`;
-            
+
             allMessages.forEach(msg => {
-                if (msg.type === 'user' && msg.message) {
-                    // Skip local command messages
-                    if (typeof msg.message.content === 'string' &&
-                        (msg.message.content.includes('<command-name>') ||
-                         msg.message.content.includes('<local-command-stdout>') ||
-                         msg.message.content.includes('Caveat: The messages below were generated'))) {
-                        return;
-                    }
+                const meta = classifyMessage(msg);
+                if (meta.isLocalCommand) return;
+                if (filterToolsEnabled && meta.isToolResult) return;
 
-                    // Skip tool results if filter is enabled
-                    if (filterToolsEnabled && Array.isArray(msg.message.content)) {
-                        const hasToolResult = msg.message.content.some(item => item.type === 'tool_result');
-                        if (hasToolResult) return;
-                    }
+                const content = msg.message?.content;
+                let text = '';
 
-                    let content = '';
-                    if (typeof msg.message.content === 'string') {
-                        content = msg.message.content;
-                    } else if (Array.isArray(msg.message.content)) {
-                        msg.message.content.forEach(item => {
-                            if (item.type === 'text') content += item.text + '\n\n';
-                        });
-                    }
-                    content = closeOpenCodeFences(content.trimEnd());
-                    if (!content) return;
-                    markdown += `## User\n\n${content}\n\n---\n\n`;
-                } else if (msg.type === 'assistant' && msg.message) {
-                    let content = '';
-                    if (typeof msg.message.content === 'string') {
-                        content = msg.message.content;
-                    } else if (Array.isArray(msg.message.content)) {
-                        msg.message.content.forEach(item => {
-                            if (item.type === 'text') content += item.text + '\n\n';
-                            if (!filterToolsEnabled && item.type === 'tool_use') {
-                                content += `**Tool:** ${item.name}\n\`\`\`json\n${JSON.stringify(item.input, null, 2)}\n\`\`\`\n\n`;
-                            }
-                        });
-                    }
-                    content = content.trimEnd();
-                    if (!content) return;
-                    markdown += `## Claude\n\n${content}\n\n---\n\n`;
+                if (typeof content === 'string') {
+                    text = content;
+                } else if (Array.isArray(content)) {
+                    content.forEach(item => {
+                        if (item.type === 'text') text += item.text + '\n\n';
+                        if (!filterToolsEnabled && item.type === 'tool_use') {
+                            text += `**Tool:** ${item.name}\n\`\`\`json\n${JSON.stringify(item.input, null, 2)}\n\`\`\`\n\n`;
+                        }
+                    });
                 }
+
+                text = meta.isUser ? closeOpenCodeFences(text.trimEnd()) : text.trimEnd();
+                if (!text) return;
+
+                const role = meta.isUser ? 'User' : 'Claude';
+                markdown += `## ${role}\n\n${text}\n\n---\n\n`;
             });
 
             markdown = markdown.replace(/(\n---\n\n)+$/, '\n');
@@ -1553,18 +1506,10 @@
 
         function toggleFilter() {
             filterToolsEnabled = !filterToolsEnabled;
-            const icon = filterToolsEnabled ? '🔽' : '🔼';
-            document.getElementById('filterIcon').textContent = icon;
-            document.getElementById('filterIconMobile').textContent = icon;
-            document.getElementById('filterBtnText').querySelector('.show-hide-prefix').textContent = filterToolsEnabled ? 'Show ' : 'Hide ';
+            updateToggleUI(['filterIcon', 'filterIconMobile'], 'filterBtnText', !filterToolsEnabled, '🔼', '🔽');
 
-            // Toggle visibility of tool messages
             document.querySelectorAll('[data-is-tool="true"]').forEach(elem => {
-                if (filterToolsEnabled) {
-                    elem.classList.add('tool-filtered');
-                } else {
-                    elem.classList.remove('tool-filtered');
-                }
+                elem.classList.toggle('tool-filtered', filterToolsEnabled);
             });
 
             // Update message highlighting if search is active
@@ -1580,8 +1525,7 @@
 
             // Optimistically update UI
             showInternalThreads = newState;
-            document.getElementById('internalIcon').textContent = newState ? '✕' : '👁';
-            document.getElementById('internalBtnText').querySelector('.show-hide-prefix').textContent = newState ? 'Hide ' : 'Show ';
+            updateToggleUI('internalIcon', 'internalBtnText', newState, '✕', '👁');
 
             try {
                 const response = await fetch(`/api/conversations?include_internal=${newState}`);
@@ -1618,25 +1562,34 @@
                 console.error('Error toggling internal threads:', error);
                 // Revert state on error
                 showInternalThreads = !newState;
-                document.getElementById('internalIcon').textContent = showInternalThreads ? '✕' : '👁';
-                document.getElementById('internalBtnText').querySelector('.show-hide-prefix').textContent = showInternalThreads ? 'Hide ' : 'Show ';
+                updateToggleUI('internalIcon', 'internalBtnText', showInternalThreads, '✕', '👁');
             } finally {
                 btn.disabled = false;
             }
         }
 
         // Search functionality with debounce
-        document.getElementById('globalSearch').addEventListener('input', (e) => {
+        const searchBox = document.getElementById('globalSearch');
+        searchBox.addEventListener('input', (e) => {
             clearTimeout(searchDebounceTimer);
             searchDebounceTimer = setTimeout(() => {
                 performSearch(e.target.value);
             }, 200);
         });
 
+        // Enter submits search, Shift+Enter inserts newline
+        searchBox.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                clearTimeout(searchDebounceTimer);
+                performSearch(searchBox.value);
+            }
+        });
+
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
             const activeElement = document.activeElement;
-            const isInputFocused = activeElement.tagName === 'INPUT';
+            const isInputFocused = activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA';
             
             // Press '/' to focus search (on mobile, return to list view first)
             if (e.key === '/' && !isInputFocused) {
@@ -1665,21 +1618,15 @@
                 }
             }
             
-            // Navigate conversations with j/k
             if (!isInputFocused) {
                 const convItems = document.querySelectorAll('.conversation-item');
-                if (e.key === 'j' && convItems.length > 0) {
+                const dir = e.key === 'j' ? 1 : e.key === 'k' ? -1 : 0;
+                if (dir && convItems.length > 0) {
                     e.preventDefault();
-                    selectedConvIndex = Math.min(selectedConvIndex + 1, convItems.length - 1);
-                    convItems[selectedConvIndex].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    selectedConvIndex = Math.max(0, Math.min(selectedConvIndex + dir, convItems.length - 1));
                     convItems.forEach(item => item.style.outline = 'none');
                     convItems[selectedConvIndex].style.outline = '2px solid #4a9eff';
-                } else if (e.key === 'k' && convItems.length > 0) {
-                    e.preventDefault();
-                    selectedConvIndex = Math.max(selectedConvIndex - 1, 0);
                     convItems[selectedConvIndex].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                    convItems.forEach(item => item.style.outline = 'none');
-                    convItems[selectedConvIndex].style.outline = '2px solid #4a9eff';
                 } else if (e.key === 'Enter' && convItems[selectedConvIndex]) {
                     e.preventDefault();
                     convItems[selectedConvIndex].click();
