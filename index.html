@@ -876,7 +876,7 @@
                          data-id="${conv.id}"
                          onclick="loadConversation('${conv.id}')">
                         <div class="conversation-title truncate">${escapeHtml(conv.title)}</div>
-                        ${hasMatches && snippet ? `<div class="match-snippet truncate">${searchTerm ? escapeHtml(snippet).replace(new RegExp(`(${searchTermToPattern(searchTerm)})`, 'gis'), '<span class="highlight">$1</span>') : escapeHtml(snippet)}</div>` : ''}
+                        ${hasMatches && snippet ? `<div class="match-snippet truncate">${searchTerm ? escapeHtml(snippet).replace(new RegExp(`(${searchTermToSnippetPattern(searchTerm)})`, 'gis'), '<span class="highlight">$1</span>') : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
                             ${hasMatches ? `<span class="match-count">${matchCount} matches</span>` : ''}
@@ -961,29 +961,118 @@
             });
         }
 
-        function searchTermToPattern(term) {
-            const normalized = term.replace(/\\n/g, '\n');
-            const segments = normalized.split('\n');
-            const escaped = segments.map(escapeRegex);
-            const joiner = '(?:\\n|\\\\n|\\s+)';
-            const parts = [];
-            for (let i = 0; i < escaped.length; i++) {
-                if (escaped[i]) parts.push(escaped[i]);
-                if (i < segments.length - 1 && (escaped[i] || parts.length))
-                    parts.push(joiner);
+        function searchTermToPattern(term, forHtml) {
+            const broad = forHtml
+                ? '(?:\\n|\\\\n|<br\\s*/?>\\s*|\\s+)'
+                : '(?:\\n|\\\\n|\\s+)';
+            const narrow = forHtml
+                ? '(?:\\n|<br\\s*/?>\\s*|\\s+)'
+                : '(?:\\n|\\s+)';
+            const result = [];
+            let i = 0;
+            while (i < term.length) {
+                if (i + 1 < term.length && term[i] === '\\' && term[i + 1] === 'n') {
+                    result.push(broad);
+                    i += 2;
+                } else if (term[i] === '\n') {
+                    result.push(narrow);
+                    i += 1;
+                } else {
+                    let j = i + 1;
+                    while (j < term.length) {
+                        if (term[j] === '\n') break;
+                        if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
+                        j++;
+                    }
+                    result.push(escapeRegex(term.slice(i, j)));
+                    i = j;
+                }
             }
-            return parts.join('');
+            return result.join('');
+        }
+
+        function searchTermToSnippetPattern(term) {
+            const result = [];
+            let i = 0;
+            while (i < term.length) {
+                if (i + 1 < term.length && term[i] === '\\' && term[i + 1] === 'n') {
+                    i += 2;
+                } else if (term[i] === '\n') {
+                    i += 1;
+                } else {
+                    let j = i + 1;
+                    while (j < term.length) {
+                        if (term[j] === '\n') break;
+                        if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
+                        j++;
+                    }
+                    result.push(escapeRegex(term.slice(i, j)));
+                    i = j;
+                }
+            }
+            return result.join('|');
         }
 
         function highlightText(text, term) {
             if (!term) return text;
 
-            const regex = new RegExp(`(${searchTermToPattern(term)})`, 'gis');
+            const hasNewlines = term.includes('\n') || /\\n/.test(term);
+            if (!hasNewlines) {
+                const regex = new RegExp(`(${escapeRegex(term)})`, 'gi');
+                let matchIndex = 0;
+                return text.replace(regex, (match) => {
+                    const isCurrent = matchIndex === currentSearchIndex;
+                    matchIndex++;
+                    return `<span class="highlight ${isCurrent ? 'current' : ''}" data-match-index="${matchIndex - 1}">${match}</span>`;
+                });
+            }
+
+            const htmlBroad = '(?:\\n|\\\\n|<br\\s*/?>\\s*|\\s+)';
+            const htmlNarrow = '(?:\\n|<br\\s*/?>\\s*|\\s+)';
+            const parts = [];
+            let numGroups = 0;
+            let i = 0;
+            while (i < term.length) {
+                if (i + 1 < term.length && term[i] === '\\' && term[i + 1] === 'n') {
+                    parts.push(htmlBroad);
+                    i += 2;
+                } else if (term[i] === '\n') {
+                    parts.push(htmlNarrow);
+                    i += 1;
+                } else {
+                    let j = i + 1;
+                    while (j < term.length) {
+                        if (term[j] === '\n') break;
+                        if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
+                        j++;
+                    }
+                    parts.push('(' + escapeRegex(term.slice(i, j)) + ')');
+                    numGroups++;
+                    i = j;
+                }
+            }
+
+            const regex = new RegExp(parts.join(''), 'gis');
             let matchIndex = 0;
-            return text.replace(regex, (match) => {
+            return text.replace(regex, function() {
+                const args = arguments;
                 const isCurrent = matchIndex === currentSearchIndex;
+                const cls = `highlight ${isCurrent ? 'current' : ''}`;
+                const idx = matchIndex;
                 matchIndex++;
-                return `<span class="highlight ${isCurrent ? 'current' : ''}" data-match-index="${matchIndex - 1}">${match}</span>`;
+                const full = args[0];
+                let result = '';
+                let pos = 0;
+                for (let g = 1; g <= numGroups; g++) {
+                    const gt = args[g];
+                    if (gt === undefined) continue;
+                    const gp = full.indexOf(gt, pos);
+                    result += full.slice(pos, gp);
+                    result += `<span class="${cls}" data-match-index="${idx}">${gt}</span>`;
+                    pos = gp + gt.length;
+                }
+                result += full.slice(pos);
+                return result;
             });
         }
 

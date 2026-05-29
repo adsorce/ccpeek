@@ -112,7 +112,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     yield full
                 return
             part = segs[idx]
-            for joiner in (sep, '-', '_'):
+            for joiner in (sep, '-', '_', '.'):
                 next_path = (current + joiner + part) if current else part
                 yield from resolve(segs, idx + 1, next_path)
             if current:
@@ -346,17 +346,30 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _build_search_pattern(search_term):
-        normalized = search_term.replace('\\n', '\n')
-        segments = normalized.split('\n')
-        escaped = [re.escape(s) for s in segments]
-        joiner = r'(?:\n|\\n|\s+)'
-        parts = []
-        for i, seg in enumerate(escaped):
-            if seg:
-                parts.append(seg)
-            if i < len(segments) - 1 and (seg or parts):
-                parts.append(joiner)
-        return re.compile(''.join(parts), re.IGNORECASE | re.DOTALL)
+        broad = r'(?:\n|\\n|\s+)'
+        narrow = r'(?:\n|\s+)'
+        result = []
+        i = 0
+        while i < len(search_term):
+            if (i + 1 < len(search_term)
+                    and search_term[i] == '\\' and search_term[i + 1] == 'n'):
+                result.append(broad)
+                i += 2
+            elif search_term[i] == '\n':
+                result.append(narrow)
+                i += 1
+            else:
+                j = i + 1
+                while j < len(search_term):
+                    if search_term[j] == '\n':
+                        break
+                    if (j + 1 < len(search_term)
+                            and search_term[j] == '\\' and search_term[j + 1] == 'n'):
+                        break
+                    j += 1
+                result.append(re.escape(search_term[i:j]))
+                i = j
+        return re.compile(''.join(result), re.IGNORECASE | re.DOTALL)
 
     def handle_search(self, search_term):
         """Search across all conversations for a term.
