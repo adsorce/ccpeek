@@ -713,7 +713,7 @@
 
             .global-search { max-width: none; }
 
-            .global-search textarea { font-size: 16px; }
+            .global-search textarea { font-size: 16px; line-height: 1; padding: 0.7em 0.8em 0.6em; padding-right: 40px; }
 
             /* Hide desktop-only buttons on mobile */
             #filterBtn, #exportBtn {
@@ -820,7 +820,7 @@
 
     <div class="shortcuts-help" id="shortcutsHelp">
         <strong>Keyboard Shortcuts:</strong><br>
-        / - Search (Shift+Enter for newline)<br>
+        / - Search<br>
         Esc - Clear search<br>
         j/k - Navigate chats<br>
         Enter - Open chat<br>
@@ -1664,15 +1664,6 @@
             searchDebounceTimer = setTimeout(() => {
                 performSearch(e.target.value);
             }, 200);
-        });
-
-        // Enter submits search, Shift+Enter inserts newline
-        searchBox.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                clearTimeout(searchDebounceTimer);
-                performSearch(searchBox.value);
-            }
         });
 
         // Keyboard shortcuts
