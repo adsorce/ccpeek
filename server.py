@@ -369,7 +369,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     j += 1
                 result.append(re.escape(search_term[i:j]))
                 i = j
-        return re.compile(''.join(result), re.IGNORECASE | re.DOTALL)
+        inner = ''.join(result)
+        pattern = re.compile(inner, re.IGNORECASE | re.DOTALL)
+        word_pattern = re.compile(r'\b' + inner + r'\b', re.IGNORECASE | re.DOTALL)
+        return pattern, word_pattern
 
     def handle_search(self, search_term):
         """Search across all conversations for a term.
@@ -383,12 +386,13 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
         claude_dir = os.path.expanduser('~/.claude/projects')
         matches = {}
-        pattern = self._build_search_pattern(search_term)
+        pattern, word_pattern = self._build_search_pattern(search_term)
 
         if os.path.exists(claude_dir):
             for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
                 conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
                 counts = {'text': 0, 'tool': 0, 'thinking': 0}
+                word_counts = {'text': 0, 'tool': 0, 'thinking': 0}
                 snippets = {'text': None, 'tool': None, 'thinking': None}
                 first_user_title = None
 
@@ -409,6 +413,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                         found = pattern.findall(part)
                                         if found:
                                             counts[key] += len(found)
+                                            word_counts[key] += len(word_pattern.findall(part))
                                             if snippets[key] is None:
                                                 m = pattern.search(part)
                                                 if m:
@@ -422,6 +427,9 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             'text_count': counts['text'],
                             'tool_count': counts['tool'],
                             'thinking_count': counts['thinking'],
+                            'text_word_count': word_counts['text'],
+                            'tool_word_count': word_counts['tool'],
+                            'thinking_word_count': word_counts['thinking'],
                             'is_internal': self._is_internal_thread(jsonl_file, first_user_title),
                             'snippet': snippets['text'] or snippets['tool'] or snippets['thinking'] or ''
                         }

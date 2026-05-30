@@ -1352,9 +1352,14 @@
                 }
 
                 const totalCount = visibleHits + (match.tool_count || 0);
+                const wordCount = (match.text_word_count || 0) +
+                    (match.thinking_word_count || 0) +
+                    (match.tool_word_count || 0);
+                const partialCount = totalCount - wordCount;
                 if (totalCount > 0) {
                     filteredMatches[convId] = {
                         count: totalCount,
+                        matchScore: wordCount * 2 + partialCount,
                         snippet: match.snippet || ''
                     };
                 }
@@ -1364,9 +1369,10 @@
             allConversations.forEach(conv => {
                 if (conv.title.toLowerCase().includes(searchTerm)) {
                     if (!filteredMatches[conv.id]) {
-                        filteredMatches[conv.id] = { count: 1, snippet: '' };
+                        filteredMatches[conv.id] = { count: 1, matchScore: 2, snippet: '' };
                     } else {
                         filteredMatches[conv.id].count += 1;
+                        filteredMatches[conv.id].matchScore += 2;
                     }
                 }
             });
@@ -1375,6 +1381,16 @@
             const filteredConversations = allConversations.filter(conv => {
                 const match = filteredMatches[conv.id];
                 return match && match.count > 0;
+            });
+
+            // Sort by relevance * recency
+            const now = Date.now() / 1000;
+            filteredConversations.sort((a, b) => {
+                const scoreA = filteredMatches[a.id].matchScore *
+                    (1 / (1 + ((now - (a.modified || 0)) / 86400) * 0.005));
+                const scoreB = filteredMatches[b.id].matchScore *
+                    (1 / (1 + ((now - (b.modified || 0)) / 86400) * 0.005));
+                return scoreB - scoreA;
             });
 
             if (filteredConversations.length === 0 && Object.keys(rawSearchMatches).length > 0) {
