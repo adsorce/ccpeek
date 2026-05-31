@@ -1388,20 +1388,24 @@
                 if (totalCount > 0) {
                     filteredMatches[convId] = {
                         count: totalCount,
-                        matchScore: wordCount * 2 + partialCount,
+                        wordCount: wordCount,
+                        matchScore: wordCount > 0 ? wordCount * 10 + partialCount : partialCount,
                         snippet: match.snippet || ''
                     };
                 }
             }
 
             // Also check title matches from loaded conversations
+            const titleWordRe = new RegExp(`\\b${searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
             allConversations.forEach(conv => {
                 if (conv.title.toLowerCase().includes(searchTerm)) {
+                    const isWholeWord = titleWordRe.test(conv.title);
                     if (!filteredMatches[conv.id]) {
-                        filteredMatches[conv.id] = { count: 1, matchScore: 2, snippet: '' };
+                        filteredMatches[conv.id] = { count: 1, wordCount: isWholeWord ? 1 : 0, matchScore: isWholeWord ? 10 : 1, snippet: '' };
                     } else {
                         filteredMatches[conv.id].count += 1;
-                        filteredMatches[conv.id].matchScore += 2;
+                        filteredMatches[conv.id].wordCount += isWholeWord ? 1 : 0;
+                        filteredMatches[conv.id].matchScore += isWholeWord ? 10 : 1;
                     }
                 }
             });
@@ -1412,14 +1416,16 @@
                 return match && match.count > 0;
             });
 
-            // Sort by relevance * recency
+            // Whole-word matches tier above partial-only, then sort by score * recency within each tier
             const now = Date.now() / 1000;
             filteredConversations.sort((a, b) => {
-                const scoreA = filteredMatches[a.id].matchScore *
-                    (1 / (1 + ((now - (a.modified || 0)) / 86400) * 0.005));
-                const scoreB = filteredMatches[b.id].matchScore *
-                    (1 / (1 + ((now - (b.modified || 0)) / 86400) * 0.005));
-                return scoreB - scoreA;
+                const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
+                const hasWordA = mA.wordCount > 0 ? 1 : 0;
+                const hasWordB = mB.wordCount > 0 ? 1 : 0;
+                if (hasWordA !== hasWordB) return hasWordB - hasWordA;
+                const recencyA = 1 / (1 + ((now - (a.modified || 0)) / 86400) * 0.005);
+                const recencyB = 1 / (1 + ((now - (b.modified || 0)) / 86400) * 0.005);
+                return mB.matchScore * recencyB - mA.matchScore * recencyA;
             });
 
             if (filteredConversations.length === 0 && Object.keys(rawSearchMatches).length > 0) {
