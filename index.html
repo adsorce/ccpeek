@@ -571,6 +571,13 @@
             white-space: pre-wrap;
         }
 
+        .json-key { color: #a7bdb8; }
+        .json-string { color: #b5cea8; }
+        .json-number { color: #dcdcaa; }
+        .json-bool { color: #569cd6; }
+        .json-null { color: #569cd6; }
+        .json-escape { color: #8c9bb6; }
+
         .tool-use.collapsed .tool-use-content {
             display: none;
         }
@@ -1110,7 +1117,11 @@
             if (meta.isToolResult && Array.isArray(content)) {
                 return content.map(item => {
                     if (item.type !== 'tool_result') return '';
-                    const toolContent = escapeHtml(item.content || '');
+                    const raw = item.content || '';
+                    const isObj = typeof raw !== 'string';
+                    const toolContent = isObj
+                        ? highlightJson(JSON.stringify(raw, null, 2))
+                        : escapeHtml(raw);
                     const highlighted = highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent;
                     return `<div class="tool-use"><div class="tool-use-header"><span>Tool Result${item.tool_use_id ? ` (${item.tool_use_id.slice(-8)})` : ''}</span><span class="tool-use-toggle">▼</span></div><div class="tool-use-content">${highlighted}</div></div>`;
                 }).join('');
@@ -1136,7 +1147,7 @@
                         return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div>${highlightTerm ? highlightText(t, highlightTerm) : t}</div></div>`;
                     }
                     if (item.type === 'tool_use') {
-                        const tc = escapeHtml(JSON.stringify(item.input, null, 2));
+                        const tc = highlightJson(JSON.stringify(item.input, null, 2));
                         return `<div class="tool-use collapsed"><div class="tool-use-header"><span>${escapeHtml(item.name || 'Tool Use')}</span><span class="tool-use-toggle">▶</span></div><div class="tool-use-content">${highlightTerm ? highlightText(tc, highlightTerm) : tc}</div></div>`;
                     }
                     return '';
@@ -1203,6 +1214,25 @@
 
         function escapeRegex(str) {
             return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function highlightJson(jsonStr) {
+            const s = '"(?:[^"\\\\]|\\\\.)*"';
+            return jsonStr.replace(
+                new RegExp(`(${s})(?=\\s*:)|:\\s*(${s})|:\\s*(-?\\d+\\.?\\d*(?:e[+-]?\\d+)?)|:\\s*\\b(true|false|null)\\b`, 'g'),
+                (m, key, sv, num, kw) => {
+                    if (key) return `<span class="json-key">${escapeHtml(key)}</span>`;
+                    if (sv) {
+                        const esc = escapeHtml(sv).replace(
+                            /\\(\\)|\\([nrt])/g,
+                            (m, bs, ctrl) => ctrl ? `<span class="json-escape">\\${ctrl}</span>` : m);
+                        return `: <span class="json-string">${esc}</span>`;
+                    }
+                    if (num) return `: <span class="json-number">${num}</span>`;
+                    if (kw) return `: <span class="json-${kw === 'null' ? 'null' : 'bool'}">${kw}</span>`;
+                    return m;
+                }
+            );
         }
 
         function getTextContent(content) {
@@ -1335,26 +1365,25 @@
         }
         
         function applySearchFilters() {
-            // Filter search results based on internal thread toggle only
-            // (Hide Tools only affects message display, not which conversations appear)
             const container = document.getElementById('conversationsList');
 
             const filteredMatches = {};
+            const showTools = !filterToolsEnabled;
 
             for (const [convId, match] of Object.entries(rawSearchMatches)) {
                 const thinkingHits = match.thinking_count || 0;
-                const visibleHits = (match.text_count || 0) + thinkingHits;
+                const toolHits = showTools ? (match.tool_count || 0) : 0;
+                const visibleHits = (match.text_count || 0) + thinkingHits + toolHits;
 
-                // Skip internal threads unless they have user-visible matches
-                // (text or thinking), since thinking is always shown to the user
                 if (match.is_internal && !showInternalThreads && visibleHits === 0) {
                     continue;
                 }
 
-                const totalCount = visibleHits + (match.tool_count || 0);
+                const totalCount = visibleHits;
+                const toolWordHits = showTools ? (match.tool_word_count || 0) : 0;
                 const wordCount = (match.text_word_count || 0) +
                     (match.thinking_word_count || 0) +
-                    (match.tool_word_count || 0);
+                    toolWordHits;
                 const partialCount = totalCount - wordCount;
                 if (totalCount > 0) {
                     filteredMatches[convId] = {
@@ -1418,6 +1447,8 @@
                 renderConversations(allConversations);
                 if (currentConversation) {
                     renderMessages(allMessages);
+                } else {
+                    document.getElementById('filterBtn').style.display = 'none';
                 }
                 document.getElementById('searchInfo').style.display = 'none';
                 return;
@@ -1449,6 +1480,9 @@
                 } catch (e) { /* keep existing list */ }
             }
 
+            // Show filter toggle during search so users can reveal tool-only matches
+            document.getElementById('filterBtn').style.display = 'block';
+
             // Apply filters and render
             applySearchFilters();
         }
@@ -1474,7 +1508,10 @@
                     content = msgContent.reduce((acc, item) => {
                         if (item.type === 'text') return acc + ' ' + (item.text || '');
                         if (item.type === 'thinking') return acc + ' ' + (item.thinking || '');
-                        if (includeTools && item.type === 'tool_result') return acc + ' ' + (item.content || '');
+                        if (includeTools && item.type === 'tool_result') {
+                            const rc = item.content || '';
+                            return acc + ' ' + (typeof rc === 'string' ? rc : JSON.stringify(rc));
+                        }
                         if (includeTools && item.type === 'tool_use') return acc + ' ' + JSON.stringify(item.input || {});
                         return acc;
                     }, '');
@@ -1550,7 +1587,10 @@
                     textToCopy = msg.message.content.map(item => {
                         if (item.type === 'text') return item.text || '';
                         if (item.type === 'tool_use') return `Tool: ${item.name}\n${JSON.stringify(item.input, null, 2)}`;
-                        if (item.type === 'tool_result') return `Tool Result: ${item.content}`;
+                        if (item.type === 'tool_result') {
+                            const rc = item.content || '';
+                            return typeof rc === 'string' ? rc : JSON.stringify(rc, null, 2);
+                        }
                         return '';
                     }).join('\n');
                 }
@@ -1617,9 +1657,11 @@
                 elem.classList.toggle('tool-filtered', filterToolsEnabled);
             });
 
-            // Update message highlighting if search is active
-            if (searchTerm && currentConversation && allMessages.length > 0) {
-                updateMessageSearchResults();
+            if (searchTerm) {
+                applySearchFilters();
+                if (currentConversation && allMessages.length > 0) {
+                    updateMessageSearchResults();
+                }
             }
         }
 
