@@ -393,7 +393,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
                 counts = {'text': 0, 'tool': 0, 'thinking': 0}
                 word_counts = {'text': 0, 'tool': 0, 'thinking': 0}
-                snippets = {'text': None, 'tool': None, 'thinking': None}
+                snippet = None
                 first_user_title = None
 
                 try:
@@ -414,10 +414,32 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                         if found:
                                             counts[key] += len(found)
                                             word_counts[key] += len(word_pattern.findall(part))
-                                            if snippets[key] is None:
-                                                m = pattern.search(part)
-                                                if m:
-                                                    snippets[key] = self._create_snippet(part, m.start())
+                                    if snippet is None:
+                                        content = data['message']['content']
+                                        items = content if isinstance(content, list) else [content]
+                                        for item in items:
+                                            if snippet is not None:
+                                                break
+                                            if isinstance(item, str):
+                                                text = item
+                                            elif isinstance(item, dict):
+                                                t = item.get('type')
+                                                if t == 'text':
+                                                    text = item.get('text', '')
+                                                elif t == 'thinking':
+                                                    text = item.get('thinking', '')
+                                                elif t == 'tool_result':
+                                                    rc = item.get('content', '')
+                                                    text = rc if isinstance(rc, str) else json.dumps(rc)
+                                                elif t == 'tool_use':
+                                                    text = json.dumps(item.get('input', {}))
+                                                else:
+                                                    continue
+                                            else:
+                                                text = str(item)
+                                            m = pattern.search(text)
+                                            if m:
+                                                snippet = self._create_snippet(text, m.start())
 
                             except (json.JSONDecodeError, TypeError, AttributeError):
                                 continue
@@ -431,7 +453,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             'tool_word_count': word_counts['tool'],
                             'thinking_word_count': word_counts['thinking'],
                             'is_internal': self._is_internal_thread(jsonl_file, first_user_title),
-                            'snippet': snippets['text'] or snippets['tool'] or snippets['thinking'] or ''
+                            'snippet': snippet or ''
                         }
 
                 except IOError as e:
