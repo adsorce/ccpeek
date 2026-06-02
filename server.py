@@ -272,6 +272,14 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
         self._json_response(messages)
 
+    @staticmethod
+    def _strip_inline_markdown(text):
+        text = re.sub(r'```[^\n]*\n(.*?)```', r'\1', text, flags=re.DOTALL)
+        text = re.sub(r'`([^`]+)`', r'\1', text)
+        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+        text = re.sub(r'(?<!\w)(\*{1,3}|_{1,3}|~~)(.*?)\1(?!\w)', r'\2', text)
+        return text
+
     def _extract_content_parts(self, content):
         """Extract text, tool, and thinking content separately from a message.
 
@@ -410,10 +418,11 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                     for key, part in parts:
                                         if not part:
                                             continue
-                                        found = pattern.findall(part)
+                                        stripped = self._strip_inline_markdown(part)
+                                        found = pattern.findall(stripped)
                                         if found:
                                             counts[key] += len(found)
-                                            word_counts[key] += len(word_pattern.findall(part))
+                                            word_counts[key] += len(word_pattern.findall(stripped))
                                     if snippet is None:
                                         content = data['message']['content']
                                         items = content if isinstance(content, list) else [content]
@@ -437,9 +446,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                                     continue
                                             else:
                                                 text = str(item)
-                                            m = pattern.search(text)
+                                            stripped_text = self._strip_inline_markdown(text)
+                                            m = pattern.search(stripped_text)
                                             if m:
-                                                snippet = self._create_snippet(text, m.start())
+                                                snippet = self._create_snippet(stripped_text, m.start())
 
                             except (json.JSONDecodeError, TypeError, AttributeError):
                                 continue

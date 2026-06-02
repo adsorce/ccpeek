@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ccpeek - Claude Chat History Viewer</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/atom-one-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
         
@@ -504,17 +506,25 @@
         }
 
         .message-text pre {
-            background: #1a1a1a;
-            padding: 12px;
-            border-radius: 6px;
+            background: #141414;
+            border-radius: 8px;
             overflow-x: auto;
             margin: 12px 0;
             position: relative;
+            padding: 0;
         }
 
         .message-text pre code {
+            display: block;
             background: none;
-            padding: 0;
+            padding: 14px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .message-text pre code.hljs {
+            background: #141414;
         }
         
         .thinking-block {
@@ -968,6 +978,14 @@
             });
         }
 
+        function stripInlineMarkdown(text) {
+            text = text.replace(/```[^\n]*\n([\s\S]*?)```/g, '$1');
+            text = text.replace(/`([^`]+)`/g, '$1');
+            text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+            text = text.replace(/(?<!\w)(\*{1,3}|_{1,3}|~~)(.*?)\1(?!\w)/g, '$2');
+            return text;
+        }
+
         function searchTermToPattern(term, forHtml) {
             const broad = forHtml
                 ? '(?:\\n|\\\\n|<br\\s*/?>\\s*|\\s+)'
@@ -1020,17 +1038,35 @@
             return result.join('|');
         }
 
+        function tagTolerantPattern(escaped) {
+            const t = '(?:<[^>]*>)*';
+            return escaped.replace(/(\\ |\s+)/g, t + '$1' + t)
+                .replace(/(?<=\S)(?=\\[^a-zA-Z\s])|(?<=\\[^a-zA-Z\s])(?=\S)/g, t);
+        }
+
+        function wrapTextSegments(match, cls, idx) {
+            return match.split(/(<[^>]*>)/).map(seg =>
+                seg.startsWith('<') ? seg
+                : seg ? `<span class="${cls}" data-match-index="${idx}">${seg}</span>`
+                : ''
+            ).join('');
+        }
+
         function highlightText(text, term) {
             if (!term) return text;
+            const t = '(?:<[^>]*>)*';
 
             const hasNewlines = term.includes('\n') || /\\n/.test(term);
             if (!hasNewlines) {
-                const regex = new RegExp(`(${escapeRegex(term)})`, 'gi');
+                const pattern = tagTolerantPattern(escapeRegex(term));
+                const regex = new RegExp(`(${pattern})`, 'gi');
                 let matchIndex = 0;
                 return text.replace(regex, (match) => {
                     const isCurrent = matchIndex === currentSearchIndex;
+                    const cls = `highlight ${isCurrent ? 'current' : ''}`;
+                    const idx = matchIndex;
                     matchIndex++;
-                    return `<span class="highlight ${isCurrent ? 'current' : ''}" data-match-index="${matchIndex - 1}">${match}</span>`;
+                    return wrapTextSegments(match, cls, idx);
                 });
             }
 
@@ -1053,7 +1089,7 @@
                         if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
                         j++;
                     }
-                    parts.push('(' + escapeRegex(term.slice(i, j)) + ')');
+                    parts.push('(' + tagTolerantPattern(escapeRegex(term.slice(i, j))) + ')');
                     numGroups++;
                     i = j;
                 }
@@ -1075,7 +1111,7 @@
                     if (gt === undefined) continue;
                     const gp = full.indexOf(gt, pos);
                     result += full.slice(pos, gp);
-                    result += `<span class="${cls}" data-match-index="${idx}">${gt}</span>`;
+                    result += wrapTextSegments(gt, cls, idx);
                     pos = gp + gt.length;
                 }
                 result += full.slice(pos);
@@ -1268,8 +1304,16 @@
 
         const markedInstance = new marked.Marked({ breaks: true, gfm: true });
         markedInstance.use({ renderer: {
-            code({ text }) {
-                return `<pre><code>${text.replace(/&amp;/g, '&')}</code></pre>`;
+            code({ text, lang }) {
+                const raw = text.replace(/&amp;/g, '&');
+                let highlighted;
+                if (lang && hljs.getLanguage(lang)) {
+                    highlighted = hljs.highlight(raw, { language: lang }).value;
+                } else {
+                    highlighted = hljs.highlightAuto(raw).value;
+                }
+                const cls = lang ? ` class="hljs language-${escapeHtml(lang)}"` : ' class="hljs"';
+                return `<pre><code${cls}>${highlighted}</code></pre>`;
             },
             codespan({ text }) {
                 return `<code>${text.replace(/&amp;/g, '&')}</code>`;
@@ -1523,7 +1567,7 @@
                     }, '');
                 }
 
-                const matches = content.match(regex);
+                const matches = stripInlineMarkdown(content).match(regex);
                 if (matches) {
                     for (let i = 0; i < matches.length; i++) searchResults.push({ messageIndex: msgIndex });
                 }
