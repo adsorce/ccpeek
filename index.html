@@ -698,10 +698,11 @@
         }
 
         /* ── Narrow ── */
+        .show-hide-prefix { display: none; }
+
         @media (max-width: 800px) {
             .global-search textarea { padding-right: 40px; }
             .search-info { display: none !important; }
-            .show-hide-prefix { display: none; }
         }
 
         /* ── Mobile ── */
@@ -788,10 +789,13 @@
                     </div>
                 </div>
                 <button class="action-btn" onclick="toggleInternalThreads()" id="internalBtn">
-                    <span id="internalIcon">👁</span> <span id="internalBtnText"><span class="show-hide-prefix">Show </span>Internal</span>
+                    <span id="internalIcon">👁️</span> <span id="internalBtnText"><span class="show-hide-prefix">Show </span>Internal</span>
+                </button>
+                <button class="action-btn" onclick="toggleThinking()" id="thinkingBtn" style="display: none;">
+                    <span id="thinkingIcon">💭</span> <span id="thinkingBtnText"><span class="show-hide-prefix">Show </span>Thinking</span>
                 </button>
                 <button class="action-btn" onclick="toggleFilter()" id="filterBtn" style="display: none;">
-                    <span id="filterIcon">🔽</span> <span id="filterBtnText"><span class="show-hide-prefix">Show </span>Tools</span>
+                    <span id="filterIcon">🔧</span> <span id="filterBtnText"><span class="show-hide-prefix">Show </span>Tools</span>
                 </button>
                 <button class="action-btn" onclick="exportConversation()" id="exportBtn" style="display: none;">
                     <span>📥</span> Export
@@ -814,7 +818,7 @@
                 </button>
                 <span class="header-title truncate" id="headerTitle"></span>
                 <button class="action-btn" onclick="toggleFilter()" id="filterBtnMobile" style="display: none;">
-                    <span id="filterIconMobile">🔽</span> Tools
+                    <span id="filterIconMobile">🔧</span> Tools
                 </button>
             </div>
             <div class="resume-bar" id="resumeBar">
@@ -855,6 +859,7 @@
         let selectedConvIndex = 0;
         let filterToolsEnabled = true; // Start with tools hidden
         let showInternalThreads = false; // Hide internal/subagent threads by default
+        let includeThinking = false;
         let searchDebounceTimer = null;
         let rawSearchMatches = {}; // Store unfiltered search results for client-side filtering
 
@@ -1310,7 +1315,7 @@
                 if (lang && hljs.getLanguage(lang)) {
                     highlighted = hljs.highlight(raw, { language: lang }).value;
                 } else {
-                    highlighted = hljs.highlightAuto(raw).value;
+                    highlighted = escapeHtml(raw);
                 }
                 const cls = lang ? ` class="hljs language-${escapeHtml(lang)}"` : ' class="hljs"';
                 return `<pre><code${cls}>${highlighted}</code></pre>`;
@@ -1412,26 +1417,21 @@
             const container = document.getElementById('conversationsList');
 
             const filteredMatches = {};
-            const showTools = !filterToolsEnabled;
 
             for (const [convId, match] of Object.entries(rawSearchMatches)) {
-                const thinkingHits = match.thinking_count || 0;
-                const toolHits = showTools ? (match.tool_count || 0) : 0;
-                const visibleHits = (match.text_count || 0) + thinkingHits + toolHits;
+                const visibleHits = (match.text_count || 0) +
+                    (match.thinking_count || 0);
 
                 if (match.is_internal && !showInternalThreads && visibleHits === 0) {
                     continue;
                 }
 
-                const totalCount = visibleHits;
-                const toolWordHits = showTools ? (match.tool_word_count || 0) : 0;
                 const wordCount = (match.text_word_count || 0) +
-                    (match.thinking_word_count || 0) +
-                    toolWordHits;
-                const partialCount = totalCount - wordCount;
-                if (totalCount > 0) {
+                    (match.thinking_word_count || 0);
+                const partialCount = visibleHits - wordCount;
+                if (visibleHits > 0) {
                     filteredMatches[convId] = {
-                        count: totalCount,
+                        count: visibleHits,
                         wordCount: wordCount,
                         matchScore: wordCount > 0 ? wordCount * 10 + partialCount : partialCount,
                         snippet: match.snippet || ''
@@ -1494,6 +1494,7 @@
 
             if (!searchTerm) {
                 rawSearchMatches = {};
+                document.getElementById('thinkingBtn').style.display = 'none';
                 renderConversations(allConversations);
                 if (currentConversation) {
                     renderMessages(allMessages);
@@ -1510,7 +1511,7 @@
 
             // Search across all conversations via server-side API (always includes internal)
             try {
-                const response = await fetch(`/api/search?q=${encodeURIComponent(term)}`);
+                const response = await fetch(`/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}`);
                 const data = await response.json();
                 rawSearchMatches = data.matches || {};
             } catch (error) {
@@ -1530,7 +1531,7 @@
                 } catch (e) { /* keep existing list */ }
             }
 
-            // Show filter toggle during search so users can reveal tool-only matches
+            document.getElementById('thinkingBtn').style.display = 'block';
             document.getElementById('filterBtn').style.display = 'block';
 
             // Apply filters and render
@@ -1538,12 +1539,9 @@
         }
 
         function updateMessageSearchResults() {
-            // Update search results for currently loaded messages
-            // Only search visible content (exclude tool content when tools are hidden)
             if (!currentConversation || allMessages.length === 0) return;
 
             searchResults = [];
-            const includeTools = !filterToolsEnabled;
 
             const regex = new RegExp(searchTermToPattern(searchTerm), 'gis');
 
@@ -1557,12 +1555,7 @@
                 } else if (Array.isArray(msgContent)) {
                     content = msgContent.reduce((acc, item) => {
                         if (item.type === 'text') return acc + ' ' + (item.text || '');
-                        if (item.type === 'thinking') return acc + ' ' + (item.thinking || '');
-                        if (includeTools && item.type === 'tool_result') {
-                            const rc = item.content || '';
-                            return acc + ' ' + (typeof rc === 'string' ? rc : JSON.stringify(rc));
-                        }
-                        if (includeTools && item.type === 'tool_use') return acc + ' ' + JSON.stringify(item.input || {});
+                        if (item.type === 'thinking' && includeThinking) return acc + ' ' + (item.thinking || '');
                         return acc;
                     }, '');
                 }
@@ -1701,17 +1694,19 @@
 
         function toggleFilter() {
             filterToolsEnabled = !filterToolsEnabled;
-            updateToggleUI(['filterIcon', 'filterIconMobile'], 'filterBtnText', !filterToolsEnabled, '🔼', '🔽');
+            updateToggleUI(['filterIcon', 'filterIconMobile'], 'filterBtnText', !filterToolsEnabled, '❌', '🔧');
 
             document.querySelectorAll('[data-is-tool="true"]').forEach(elem => {
                 elem.classList.toggle('tool-filtered', filterToolsEnabled);
             });
+        }
 
+        async function toggleThinking() {
+            includeThinking = !includeThinking;
+            updateToggleUI('thinkingIcon', 'thinkingBtnText',
+                includeThinking, '❌', '💭');
             if (searchTerm) {
-                applySearchFilters();
-                if (currentConversation && allMessages.length > 0) {
-                    updateMessageSearchResults();
-                }
+                await performSearch(searchTerm);
             }
         }
 
@@ -1722,7 +1717,7 @@
 
             // Optimistically update UI
             showInternalThreads = newState;
-            updateToggleUI('internalIcon', 'internalBtnText', newState, '✕', '👁');
+            updateToggleUI('internalIcon', 'internalBtnText', newState, '❌', '👁️');
 
             try {
                 const response = await fetch(`/api/conversations?include_internal=${newState}`);
@@ -1759,7 +1754,7 @@
                 console.error('Error toggling internal threads:', error);
                 // Revert state on error
                 showInternalThreads = !newState;
-                updateToggleUI('internalIcon', 'internalBtnText', showInternalThreads, '✕', '👁');
+                updateToggleUI('internalIcon', 'internalBtnText', showInternalThreads, '❌', '👁️');
             } finally {
                 btn.disabled = false;
             }

@@ -22,6 +22,14 @@ SETUP_MARKER = os.path.expanduser('~/.config/ccpeek/.setup-done')
 UNIT_PATH = os.path.expanduser('~/.config/systemd/user/ccpeek.service')
 TASK_NAME = 'CCPeek'
 
+_RE_MD_FENCED = re.compile(r'```[^\n]*\n(.*?)```', re.DOTALL)
+_RE_MD_INLINE = re.compile(r'`([^`]+)`')
+_RE_MD_LINK = re.compile(r'\[([^\]]+)\]\([^)]+\)')
+_RE_MD_EMPH = re.compile(r'(?<!\w)(\*{1,3}|_{1,3}|~~)(.*?)\1(?!\w)')
+
+_search_cache = {}
+_search_cache_lock = threading.Lock()
+
 def extract_first_text(content, max_len=100):
     if isinstance(content, str):
         text = content
@@ -38,7 +46,12 @@ def extract_first_text(content, max_len=100):
         return ''
     return text[:max_len] + ('...' if len(text) > max_len else '') if text else ''
 
+class CCPeekServer(HTTPServer):
+    allow_reuse_address = False
+
 class CCPeekHandler(SimpleHTTPRequestHandler):
+    _path_cache = {}
+
     def _json_response(self, data, status=200):
         self.send_response(status)
         self.send_header('Content-type', 'application/json')
@@ -68,7 +81,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/search':
             query_params = parse_qs(parsed_path.query)
             search_term = query_params.get('q', [''])[0]
-            self.handle_search(unquote(search_term))
+            include_thinking = query_params.get('include_thinking', ['false'])[0].lower() == 'true'
+            self.handle_search(unquote(search_term), include_thinking)
         else:
             super().do_GET()
 
@@ -195,6 +209,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                     parent_id = rel_parts[si - 1]
 
                             conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
+                            CCPeekHandler._path_cache[conv_id] = jsonl_file
                             conv = {
                                 'id': conv_id,
                                 'path': jsonl_file,
@@ -221,18 +236,19 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
     def handle_conversation(self, conversation_id, include_internal=False):
         """Get messages for a specific conversation"""
         claude_dir = os.path.expanduser('~/.claude/projects')
-        jsonl_path = None
 
         # Reject IDs with path separators
         if '/' in conversation_id or '\\' in conversation_id:
             self._json_response({'error': 'Invalid conversation ID'}, 400)
             return
 
-        # Find the file by exact basename match
-        for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
-            if Path(jsonl_file).stem == conversation_id:
-                jsonl_path = jsonl_file
-                break
+        jsonl_path = CCPeekHandler._path_cache.get(conversation_id)
+        if not jsonl_path:
+            for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
+                if Path(jsonl_file).stem == conversation_id:
+                    jsonl_path = jsonl_file
+                    CCPeekHandler._path_cache[conversation_id] = jsonl_path
+                    break
 
         if not jsonl_path or not os.path.exists(jsonl_path):
             self._json_response({'error': 'Conversation not found', 'conversation_id': conversation_id}, 404)
@@ -274,10 +290,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _strip_inline_markdown(text):
-        text = re.sub(r'```[^\n]*\n(.*?)```', r'\1', text, flags=re.DOTALL)
-        text = re.sub(r'`([^`]+)`', r'\1', text)
-        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-        text = re.sub(r'(?<!\w)(\*{1,3}|_{1,3}|~~)(.*?)\1(?!\w)', r'\2', text)
+        text = _RE_MD_FENCED.sub(r'\1', text)
+        text = _RE_MD_INLINE.sub(r'\1', text)
+        text = _RE_MD_LINK.sub(r'\1', text)
+        text = _RE_MD_EMPH.sub(r'\2', text)
         return text
 
     def _extract_content_parts(self, content):
@@ -337,7 +353,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
         return snippet
 
-    def _is_internal_thread(self, jsonl_path, first_user_title=None):
+    @staticmethod
+    def _is_internal_thread(jsonl_path, first_user_title=None):
         """Check if a conversation is a useless internal thread (local command output).
 
         Note: Subagent threads are NOT considered internal - they contain useful context.
@@ -382,92 +399,134 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         word_pattern = re.compile(r'\b' + inner + r'\b', re.IGNORECASE | re.DOTALL)
         return pattern, word_pattern
 
-    def handle_search(self, search_term):
+    @staticmethod
+    def _build_search_cache():
+        """Populate _search_cache with text/thinking blobs keyed by conv_id.
+
+        Only re-reads files whose mtime changed since last cache build.
+        Removes stale entries for files that no longer exist.
+        """
+        claude_dir = os.path.expanduser('~/.claude/projects')
+        if not os.path.exists(claude_dir):
+            return
+
+        current_ids = set()
+        for jsonl_file in glob.glob(
+                os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
+            conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
+            current_ids.add(conv_id)
+            try:
+                mtime = os.stat(jsonl_file).st_mtime
+            except OSError:
+                continue
+
+            with _search_cache_lock:
+                cached = _search_cache.get(conv_id)
+                if cached and cached['mtime'] == mtime:
+                    continue  # still fresh
+
+            # Read and index outside the lock to avoid blocking other threads
+            text_parts = []
+            thinking_parts = []
+            first_user_title = None
+            try:
+                with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
+                    for line in f:
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        first_user_title = CCPeekHandler._extract_title_from_line(
+                            data, first_user_title)
+                        content = (data.get('message') or {}).get('content')
+                        if not content:
+                            continue
+                        items = content if isinstance(content, list) else [content]
+                        for item in items:
+                            if isinstance(item, str):
+                                text_parts.append(
+                                    CCPeekHandler._strip_inline_markdown(item))
+                            elif isinstance(item, dict):
+                                t = item.get('type')
+                                if t == 'text':
+                                    text_parts.append(
+                                        CCPeekHandler._strip_inline_markdown(
+                                            str(item.get('text', ''))))
+                                elif t == 'thinking':
+                                    thinking_parts.append(
+                                        CCPeekHandler._strip_inline_markdown(
+                                            str(item.get('thinking', ''))))
+            except IOError:
+                continue
+
+            entry = {
+                'text': ' '.join(text_parts),
+                'thinking': ' '.join(thinking_parts),
+                'mtime': mtime,
+                'path': jsonl_file,
+                'is_internal': CCPeekHandler._is_internal_thread(
+                    jsonl_file, first_user_title),
+            }
+            with _search_cache_lock:
+                _search_cache[conv_id] = entry
+            CCPeekHandler._path_cache[conv_id] = jsonl_file
+
+        # Evict stale entries
+        with _search_cache_lock:
+            for stale in set(_search_cache) - current_ids:
+                del _search_cache[stale]
+
+    def handle_search(self, search_term, include_thinking=False):
         """Search across all conversations for a term.
 
         Returns all matches with is_internal flag so client can filter locally.
-        Returns separate counts for text and tool content for visibility filtering.
+        Uses _search_cache for speed; rebuilds only stale/new entries.
         """
         if not search_term or len(search_term) < 2:
             self._json_response({'matches': {}})
             return
 
-        claude_dir = os.path.expanduser('~/.claude/projects')
-        matches = {}
+        self._build_search_cache()
+
         pattern, word_pattern = self._build_search_pattern(search_term)
+        matches = {}
 
-        if os.path.exists(claude_dir):
-            for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
-                conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
-                counts = {'text': 0, 'tool': 0, 'thinking': 0}
-                word_counts = {'text': 0, 'tool': 0, 'thinking': 0}
-                snippet = None
-                first_user_title = None
+        with _search_cache_lock:
+            items = list(_search_cache.items())
 
-                try:
-                    with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
-                        for line in f:
-                            try:
-                                data = json.loads(line)
-                                first_user_title = self._extract_title_from_line(data, first_user_title)
+        for conv_id, entry in items:
+            text_found = pattern.findall(entry['text'])
+            text_count = len(text_found)
+            text_word_count = len(word_pattern.findall(entry['text'])) if text_count else 0
 
-                                if data.get('message') and data['message'].get('content'):
-                                    parts = zip(
-                                        ('text', 'tool', 'thinking'),
-                                        self._extract_content_parts(data['message']['content']))
-                                    for key, part in parts:
-                                        if not part:
-                                            continue
-                                        stripped = self._strip_inline_markdown(part)
-                                        found = pattern.findall(stripped)
-                                        if found:
-                                            counts[key] += len(found)
-                                            word_counts[key] += len(word_pattern.findall(stripped))
-                                    if snippet is None:
-                                        content = data['message']['content']
-                                        items = content if isinstance(content, list) else [content]
-                                        for item in items:
-                                            if snippet is not None:
-                                                break
-                                            if isinstance(item, str):
-                                                text = item
-                                            elif isinstance(item, dict):
-                                                t = item.get('type')
-                                                if t == 'text':
-                                                    text = item.get('text', '')
-                                                elif t == 'thinking':
-                                                    text = item.get('thinking', '')
-                                                elif t == 'tool_result':
-                                                    rc = item.get('content', '')
-                                                    text = rc if isinstance(rc, str) else json.dumps(rc)
-                                                elif t == 'tool_use':
-                                                    text = json.dumps(item.get('input', {}))
-                                                else:
-                                                    continue
-                                            else:
-                                                text = str(item)
-                                            stripped_text = self._strip_inline_markdown(text)
-                                            m = pattern.search(stripped_text)
-                                            if m:
-                                                snippet = self._create_snippet(stripped_text, m.start())
+            thinking_count = 0
+            thinking_word_count = 0
+            if include_thinking and entry['thinking']:
+                thinking_found = pattern.findall(entry['thinking'])
+                thinking_count = len(thinking_found)
+                thinking_word_count = (
+                    len(word_pattern.findall(entry['thinking'])) if thinking_count else 0)
 
-                            except (json.JSONDecodeError, TypeError, AttributeError):
-                                continue
+            if not text_count and not thinking_count:
+                continue
 
-                    if any(counts.values()):
-                        matches[conv_id] = {
-                            'text_count': counts['text'],
-                            'tool_count': counts['tool'],
-                            'thinking_count': counts['thinking'],
-                            'text_word_count': word_counts['text'],
-                            'tool_word_count': word_counts['tool'],
-                            'thinking_word_count': word_counts['thinking'],
-                            'is_internal': self._is_internal_thread(jsonl_file, first_user_title),
-                            'snippet': snippet or ''
-                        }
+            snippet = None
+            m = pattern.search(entry['text'])
+            if m:
+                snippet = self._create_snippet(entry['text'], m.start())
+            elif include_thinking and entry['thinking']:
+                m = pattern.search(entry['thinking'])
+                if m:
+                    snippet = self._create_snippet(entry['thinking'], m.start())
 
-                except IOError as e:
-                    print(f"Error reading {jsonl_file}: {e}")
+            matches[conv_id] = {
+                'text_count': text_count,
+                'thinking_count': thinking_count,
+                'text_word_count': text_word_count,
+                'thinking_word_count': thinking_word_count,
+                'is_internal': entry['is_internal'],
+                'snippet': snippet or '',
+            }
 
         self._json_response({'matches': matches})
 
@@ -934,7 +993,7 @@ def main(argv=None):
 
     port = args.port
     try:
-        httpd = HTTPServer((host, port), CCPeekHandler)
+        httpd = CCPeekServer((host, port), CCPeekHandler)
     except OSError as err:
         print(f"Failed to start server on {host}:{port} -> {err}")
         sys.exit(1)
