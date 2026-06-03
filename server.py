@@ -476,11 +476,54 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             for stale in set(_search_cache) - current_ids:
                 del _search_cache[stale]
 
+    @staticmethod
+    def _build_token_patterns(search_term):
+        tokens = search_term.split()
+        if len(tokens) < 2:
+            return None
+        patterns = []
+        for tok in tokens:
+            escaped = re.escape(tok)
+            p = re.compile(escaped, re.IGNORECASE)
+            wp = re.compile(r'\b' + escaped + r'\b', re.IGNORECASE)
+            patterns.append((tok, p, wp))
+        return patterns
+
+    def _token_search(self, text, token_patterns):
+        for _tok, p, _wp in token_patterns:
+            if not p.search(text):
+                return None
+        total = 0
+        word_total = 0
+        for _tok, p, wp in token_patterns:
+            total += len(p.findall(text))
+            word_total += len(wp.findall(text))
+        return total, word_total
+
+    def _token_snippet(self, text, token_patterns, max_len=80):
+        rarest_tok = None
+        rarest_count = float('inf')
+        rarest_match = None
+        for _tok, p, _wp in token_patterns:
+            m = p.search(text)
+            if m:
+                count = len(p.findall(text))
+                if count < rarest_count:
+                    rarest_count = count
+                    rarest_match = m
+                    rarest_tok = _tok
+        if rarest_match:
+            return self._create_snippet(text, rarest_match.start(), max_len)
+        return ''
+
     def handle_search(self, search_term, include_thinking=False):
         """Search across all conversations for a term.
 
         Returns all matches with is_internal flag so client can filter locally.
         Uses _search_cache for speed; rebuilds only stale/new entries.
+        Phrases are matched exactly first; if the query has multiple tokens
+        and the exact phrase doesn't match, falls back to requiring all
+        tokens to appear independently (match_type="all_terms").
         """
         if not search_term or len(search_term) < 2:
             self._json_response({'matches': {}})
@@ -489,6 +532,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         self._build_search_cache()
 
         pattern, word_pattern = self._build_search_pattern(search_term)
+        token_patterns = self._build_token_patterns(search_term)
         matches = {}
 
         with _search_cache_lock:
@@ -507,25 +551,56 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 thinking_word_count = (
                     len(word_pattern.findall(entry['thinking'])) if thinking_count else 0)
 
-            if not text_count and not thinking_count:
+            if text_count or thinking_count:
+                snippet = None
+                m = pattern.search(entry['text'])
+                if m:
+                    snippet = self._create_snippet(entry['text'], m.start())
+                elif include_thinking and entry['thinking']:
+                    m = pattern.search(entry['thinking'])
+                    if m:
+                        snippet = self._create_snippet(entry['thinking'], m.start())
+
+                matches[conv_id] = {
+                    'text_count': text_count,
+                    'thinking_count': thinking_count,
+                    'text_word_count': text_word_count,
+                    'thinking_word_count': thinking_word_count,
+                    'is_internal': entry['is_internal'],
+                    'snippet': snippet or '',
+                }
                 continue
 
-            snippet = None
-            m = pattern.search(entry['text'])
-            if m:
-                snippet = self._create_snippet(entry['text'], m.start())
-            elif include_thinking and entry['thinking']:
-                m = pattern.search(entry['thinking'])
-                if m:
-                    snippet = self._create_snippet(entry['thinking'], m.start())
+            if not token_patterns:
+                continue
+
+            text_tok = self._token_search(entry['text'], token_patterns)
+            think_tok = None
+            if include_thinking and entry['thinking']:
+                think_tok = self._token_search(
+                    entry['thinking'], token_patterns)
+
+            if not text_tok and not think_tok:
+                continue
+
+            t_count, t_wcount = text_tok or (0, 0)
+            th_count, th_wcount = think_tok or (0, 0)
+
+            snippet = self._token_snippet(
+                entry['text'], token_patterns) if text_tok else ''
+            if not snippet and think_tok:
+                snippet = self._token_snippet(
+                    entry['thinking'], token_patterns)
 
             matches[conv_id] = {
-                'text_count': text_count,
-                'thinking_count': thinking_count,
-                'text_word_count': text_word_count,
-                'thinking_word_count': thinking_word_count,
+                'text_count': t_count,
+                'thinking_count': th_count,
+                'text_word_count': t_wcount,
+                'thinking_word_count': th_wcount,
                 'is_internal': entry['is_internal'],
                 'snippet': snippet or '',
+                'match_type': 'all_terms',
+                'tokens': [tok for tok, _, _ in token_patterns],
             }
 
         self._json_response({'matches': matches})

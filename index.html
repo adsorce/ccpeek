@@ -862,6 +862,8 @@
         let includeThinking = false;
         let searchDebounceTimer = null;
         let rawSearchMatches = {}; // Store unfiltered search results for client-side filtering
+        let currentMatchType = 'phrase'; // 'phrase' or 'all_terms'
+        let currentTokens = []; // individual tokens for all_terms matches
 
         // Load conversations on startup
         async function loadConversations() {
@@ -897,8 +899,8 @@
                     <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
                          data-id="${conv.id}"
                          onclick="loadConversation('${conv.id}')">
-                        <div class="conversation-title truncate">${escapeHtml(conv.title)}</div>
-                        ${hasMatches && snippet ? `<div class="match-snippet truncate">${searchTerm ? escapeHtml(snippet).replace(new RegExp(`(${searchTermToSnippetPattern(searchTerm)})`, 'gis'), '<span class="highlight">$1</span>') : escapeHtml(snippet)}</div>` : ''}
+                        <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
+                        ${hasMatches && snippet ? `<div class="match-snippet truncate">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
                             ${hasMatches ? `<span class="match-count">${matchCount} matches</span>` : ''}
@@ -955,6 +957,14 @@
 
                 // Re-apply search highlighting in messages if there's an active search
                 if (searchTerm) {
+                    const matchData = rawSearchMatches[conversationId];
+                    if (matchData?.match_type === 'all_terms' && matchData.tokens) {
+                        currentMatchType = 'all_terms';
+                        currentTokens = matchData.tokens;
+                    } else {
+                        currentMatchType = 'phrase';
+                        currentTokens = [];
+                    }
                     updateMessageSearchResults();
                 }
             } catch (error) {
@@ -1043,6 +1053,13 @@
             return result.join('|');
         }
 
+        function highlightSidebar(html, matchData) {
+            const pat = matchData?.tokens
+                ? matchData.tokens.map(escapeRegex).join('|')
+                : searchTermToSnippetPattern(searchTerm);
+            return html.replace(new RegExp(`(${pat})`, 'gis'), '<span class="highlight">$1</span>');
+        }
+
         function tagTolerantPattern(escaped) {
             const t = '(?:<[^>]*>)*';
             return escaped.replace(/(\\ |\s+)/g, t + '$1' + t)
@@ -1059,11 +1076,12 @@
 
         function highlightText(text, term) {
             if (!term) return text;
+            if (Array.isArray(term)) return highlightTokens(text, term);
             const t = '(?:<[^>]*>)*';
 
             const hasNewlines = term.includes('\n') || /\\n/.test(term);
             if (!hasNewlines) {
-                const pattern = tagTolerantPattern(escapeRegex(term));
+                const pattern = tagTolerantPattern(entityAwareEscaped(escapeRegex(term)));
                 const regex = new RegExp(`(${pattern})`, 'gi');
                 let matchIndex = 0;
                 return text.replace(regex, (match) => {
@@ -1094,7 +1112,7 @@
                         if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
                         j++;
                     }
-                    parts.push('(' + tagTolerantPattern(escapeRegex(term.slice(i, j))) + ')');
+                    parts.push('(' + tagTolerantPattern(entityAwareEscaped(escapeRegex(term.slice(i, j)))) + ')');
                     numGroups++;
                     i = j;
                 }
@@ -1121,6 +1139,20 @@
                 }
                 result += full.slice(pos);
                 return result;
+            });
+        }
+
+        function highlightTokens(text, tokens) {
+            let matchIndex = 0;
+            const alts = tokens.map(tok =>
+                '\\b' + tagTolerantPattern(entityAwareEscaped(escapeRegex(tok))) + '\\b').join('|');
+            const regex = new RegExp(`(${alts})`, 'gi');
+            return text.replace(regex, (match) => {
+                const isCurrent = matchIndex === currentSearchIndex;
+                const cls = `highlight ${isCurrent ? 'current' : ''}`;
+                const idx = matchIndex;
+                matchIndex++;
+                return wrapTextSegments(match, cls, idx);
             });
         }
 
@@ -1255,6 +1287,14 @@
 
         function escapeRegex(str) {
             return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function entityAwareEscaped(escaped) {
+            return escaped
+                .replace(/&/g, '(?:&|&amp;)')
+                .replace(/>/g, '(?:>|&gt;)')
+                .replace(/</g, '(?:<|&lt;)')
+                .replace(/"/g, '(?:"|&quot;)');
         }
 
         function highlightJson(jsonStr) {
@@ -1430,12 +1470,14 @@
                     (match.thinking_word_count || 0);
                 const partialCount = visibleHits - wordCount;
                 if (visibleHits > 0) {
-                    filteredMatches[convId] = {
+                    const entry = {
                         count: visibleHits,
                         wordCount: wordCount,
                         matchScore: wordCount > 0 ? wordCount * 10 + partialCount : partialCount,
                         snippet: match.snippet || ''
                     };
+                    if (match.tokens) entry.tokens = match.tokens;
+                    filteredMatches[convId] = entry;
                 }
             }
 
@@ -1494,6 +1536,8 @@
 
             if (!searchTerm) {
                 rawSearchMatches = {};
+                currentMatchType = 'phrase';
+                currentTokens = [];
                 document.getElementById('thinkingBtn').style.display = 'none';
                 renderConversations(allConversations);
                 if (currentConversation) {
@@ -1543,11 +1587,18 @@
 
             searchResults = [];
 
-            const regex = new RegExp(searchTermToPattern(searchTerm), 'gis');
+            const isTokenMode = currentMatchType === 'all_terms' && currentTokens.length > 1;
+            const regexes = isTokenMode
+                ? currentTokens.map(tok => new RegExp('\\b' + escapeRegex(tok) + '\\b', 'gi'))
+                : [new RegExp(searchTermToPattern(searchTerm), 'gis')];
 
             allMessages.forEach((msg, msgIndex) => {
                 const msgContent = msg.message?.content;
                 if (!msgContent) return;
+
+                const meta = classifyMessage(msg);
+                if (meta.isLocalCommand) return;
+                if (filterToolsEnabled && (meta.isToolResult || meta.isToolUse)) return;
 
                 let content = '';
                 if (typeof msgContent === 'string') {
@@ -1560,19 +1611,23 @@
                     }, '');
                 }
 
-                const matches = stripInlineMarkdown(content).match(regex);
-                if (matches) {
-                    for (let i = 0; i < matches.length; i++) searchResults.push({ messageIndex: msgIndex });
+                const stripped = stripInlineMarkdown(content);
+                let matchCount = 0;
+                for (const re of regexes) {
+                    const matches = stripped.match(re);
+                    if (matches) matchCount += matches.length;
                 }
+                for (let i = 0; i < matchCount; i++) searchResults.push({ messageIndex: msgIndex });
             });
 
+            const highlightArg = isTokenMode ? currentTokens : searchTerm;
             if (searchResults.length > 0) {
                 currentSearchIndex = 0;
                 updateSearchInfo();
-                renderMessages(allMessages, searchTerm);
+                renderMessages(allMessages, highlightArg);
                 scrollToCurrentMatch();
             } else {
-                renderMessages(allMessages, searchTerm);
+                renderMessages(allMessages, highlightArg);
                 document.getElementById('searchInfo').style.display = 'none';
             }
         }
@@ -1587,8 +1642,9 @@
             }
             
             updateSearchInfo();
-            renderMessages(allMessages, searchTerm);
-            scrollToCurrentMatch();
+            const highlightArg = currentMatchType === 'all_terms' && currentTokens.length > 1 ? currentTokens : searchTerm;
+            renderMessages(allMessages, highlightArg);
+            scrollToCurrentMatch(true);
         }
 
         function updateSearchInfo() {
@@ -1606,17 +1662,11 @@
             }
         }
 
-        function scrollToCurrentMatch() {
-            // Use double requestAnimationFrame to ensure DOM has fully updated and layout is complete
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    // Only select visible highlights (exclude those in tool-filtered messages)
-                    const highlights = document.querySelectorAll('.message:not(.tool-filtered) .highlight');
-                    if (highlights[currentSearchIndex]) {
-                        highlights[currentSearchIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    }
-                });
-            });
+        function scrollToCurrentMatch(smooth) {
+            setTimeout(() => {
+                const el = document.querySelector('.message:not(.tool-filtered) .highlight.current');
+                if (el) el.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'center' });
+            }, 0);
         }
 
         function copyMessage(btn, messageIndex) {
