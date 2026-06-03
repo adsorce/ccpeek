@@ -86,12 +86,17 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         else:
             super().do_GET()
 
+    _INTERNAL_PREFIXES = ('<local-command-', '<command-message>', '<command-name>')
+
     @staticmethod
     def _extract_title_from_line(data, current_title=None):
         if current_title is not None:
             return current_title
         if data.get('type') == 'user' and data.get('message'):
-            return extract_first_text(data['message'].get('content', ''))
+            text = extract_first_text(data['message'].get('content', ''))
+            if text and any(text.startswith(p) for p in CCPeekHandler._INTERNAL_PREFIXES):
+                return None
+            return text
         return None
 
     @staticmethod
@@ -361,12 +366,24 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         Only threads with local command markers are hidden by default.
         """
         if first_user_title:
-            # Any <local-command-*> variant
-            if first_user_title.startswith('<local-command-'):
+            if any(first_user_title.startswith(p) for p in CCPeekHandler._INTERNAL_PREFIXES):
                 return True
-            # Slash command invocations
-            if first_user_title.startswith('<command-message>'):
-                return True
+            return False
+        # No real user message found; check if the file has only command messages
+        try:
+            with open(jsonl_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get('type') == 'user' and data.get('message'):
+                        text = extract_first_text(data['message'].get('content', ''))
+                        if text and any(text.startswith(p) for p in CCPeekHandler._INTERNAL_PREFIXES):
+                            return True
+                        return False
+        except IOError:
+            pass
         return False
 
     @staticmethod
