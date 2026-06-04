@@ -534,6 +534,7 @@
             padding: 12px;
             margin: 8px 0;
             font-style: italic;
+            font-size: 9.5pt;
             color: #9ca3af;
             position: relative;
             white-space: pre-wrap;
@@ -543,6 +544,14 @@
             max-height: 200px;
             overflow: hidden;
             position: relative;
+            opacity: 0.65;
+            transition: opacity 0.15s, max-height 150ms ease-out;
+        }
+
+        .thinking-block:hover .thinking-content,
+        .thinking-block.expanded .thinking-content,
+        .thinking-all-expanded .thinking-content {
+            opacity: 1;
         }
 
         .thinking-content.needs-fade::after {
@@ -558,7 +567,6 @@
 
         .thinking-block.expanded .thinking-content,
         .thinking-all-expanded .thinking-content {
-            max-height: none;
             overflow: visible;
         }
 
@@ -569,23 +577,29 @@
 
         .thinking-block.expanded .thinking-content.needs-fade ~ .thinking-expand,
         .thinking-all-expanded .thinking-content.needs-fade ~ .thinking-expand {
-            display: none;
+            visibility: hidden;
         }
 
         .thinking-expand {
             display: none;
             text-align: center;
-            margin-top: 4px;
+            padding: 6px 0;
+            margin-top: 2px;
             cursor: pointer;
             color: #6b7280;
             font-size: 14px;
             font-style: normal;
             user-select: none;
-            transition: color 0.15s;
+            background: rgba(0, 0, 0, 0.15);
+            border: 1px solid rgba(128, 168, 255, 0.1);
+            border-radius: 4px;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
         }
 
         .thinking-expand:hover {
             color: #9ca3af;
+            background: rgba(0, 0, 0, 0.25);
+            border-color: rgba(128, 168, 255, 0.2);
         }
 
         .thinking-content.needs-fade ~ .thinking-expand {
@@ -593,10 +607,9 @@
         }
 
         .thinking-header {
-            font-size: 12px;
             color: #6b7280;
             margin-bottom: 8px;
-            font-weight: 600;
+            font-weight: bold;
             font-style: normal;
         }
 
@@ -1284,7 +1297,7 @@
                     }
                     if (item.type === 'thinking') {
                         const t = escapeHtml(item.thinking || '');
-                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="this.parentElement.classList.add('expanded')">▼</div></div>`;
+                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="expandThinking(this.parentElement)">▼</div></div>`;
                     }
                     if (item.type === 'tool_use') {
                         const tc = highlightJson(JSON.stringify(item.input, null, 2));
@@ -1820,15 +1833,39 @@
             });
         }
 
+        function expandThinking(block) {
+            const content = block.querySelector('.thinking-content');
+            const expand = block.querySelector('.thinking-expand');
+            if (expand) expand.style.visibility = 'hidden';
+            content.style.maxHeight = content.scrollHeight + 'px';
+            block.classList.add('expanded');
+        }
+
+        function collapseThinking(block) {
+            const content = block.querySelector('.thinking-content');
+            content.style.maxHeight = content.scrollHeight + 'px';
+            content.offsetHeight;
+            content.style.maxHeight = '';
+            block.classList.remove('expanded');
+        }
+
         async function toggleThinking() {
             includeThinking = !includeThinking;
             updateToggleUI('thinkingIcon', 'thinkingBtnText',
                 includeThinking, '❌', '💭');
             const container = document.getElementById('messagesContainer');
-            container.classList.toggle('thinking-all-expanded', includeThinking);
-            if (!includeThinking) {
+            if (includeThinking) {
+                container.querySelectorAll('.thinking-content.needs-fade').forEach(el => {
+                    el.style.maxHeight = el.scrollHeight + 'px';
+                });
+                container.classList.add('thinking-all-expanded');
+            } else {
+                container.classList.remove('thinking-all-expanded');
                 container.querySelectorAll('.thinking-block.expanded').forEach(
                     el => el.classList.remove('expanded'));
+                container.querySelectorAll('.thinking-content').forEach(el => {
+                    el.style.maxHeight = '';
+                });
             }
             if (searchTerm) {
                 await performSearch(searchTerm);
