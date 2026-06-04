@@ -738,7 +738,7 @@
                 display: none !important;
             }
 
-            #internalBtn {
+            #agentBtn {
                 font-size: 12px;
                 padding: 6px 10px;
                 white-space: nowrap;
@@ -788,8 +788,8 @@
                         </div>
                     </div>
                 </div>
-                <button class="action-btn" onclick="toggleInternalThreads()" id="internalBtn">
-                    <span id="internalIcon">👁️</span> <span id="internalBtnText"><span class="show-hide-prefix">Show </span>Internal</span>
+                <button class="action-btn" onclick="toggleAgentThreads()" id="agentBtn">
+                    <span id="agentIcon">🕵🏻</span> <span id="agentBtnText"><span class="show-hide-prefix">Show </span>Agents</span>
                 </button>
                 <button class="action-btn" onclick="toggleThinking()" id="thinkingBtn" style="display: none;">
                     <span id="thinkingIcon">💭</span> <span id="thinkingBtnText"><span class="show-hide-prefix">Show </span>Thinking</span>
@@ -858,19 +858,24 @@
         let searchTerm = '';
         let selectedConvIndex = 0;
         let filterToolsEnabled = true; // Start with tools hidden
-        let showInternalThreads = false; // Hide internal/subagent threads by default
+        let showAgentThreads = false; // Hide agent/subagent threads by default
         let includeThinking = false;
         let searchDebounceTimer = null;
         let rawSearchMatches = {}; // Store unfiltered search results for client-side filtering
         let currentMatchType = 'phrase'; // 'phrase' or 'all_terms'
         let currentTokens = []; // individual tokens for all_terms matches
 
+        function filterAgentThreads(conversations) {
+            if (showAgentThreads) return conversations;
+            return conversations.filter(c => !c.parent_id);
+        }
+
         // Load conversations on startup
         async function loadConversations() {
             try {
-                const response = await fetch(`/api/conversations?include_internal=${showInternalThreads}`);
+                const response = await fetch('/api/conversations?include_internal=true');
                 allConversations = await response.json();
-                renderConversations(allConversations);
+                renderConversations(filterAgentThreads(allConversations));
             } catch (error) {
                 console.error('Error loading conversations:', error);
                 document.getElementById('conversationsList').innerHTML =
@@ -936,7 +941,7 @@
             document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
 
             try {
-                const includeInternal = showInternalThreads || !!rawSearchMatches[conversationId];
+                const includeInternal = true;
                 const response = await fetch(`/api/conversation/${conversationId}?include_internal=${includeInternal}`);
                 const data = await response.json();
 
@@ -1462,7 +1467,7 @@
                 const visibleHits = (match.text_count || 0) +
                     (match.thinking_count || 0);
 
-                if (match.is_internal && !showInternalThreads && visibleHits === 0) {
+                if (match.is_internal && visibleHits === 0) {
                     continue;
                 }
 
@@ -1496,16 +1501,19 @@
                 }
             });
 
-            // Filter conversations to those with matches
-            const filteredConversations = allConversations.filter(conv => {
+            // Filter conversations to those with matches, respecting agent toggle
+            const filteredConversations = filterAgentThreads(allConversations).filter(conv => {
                 const match = filteredMatches[conv.id];
                 return match && match.count > 0;
             });
 
-            // Whole-word matches tier above partial-only, then sort by score * recency within each tier
+            // Phrase matches tier above all_terms, whole-word above partial, then score * recency
             const now = Date.now() / 1000;
             filteredConversations.sort((a, b) => {
                 const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
+                const isPhraseA = rawSearchMatches[a.id]?.match_type === 'all_terms' ? 0 : 1;
+                const isPhraseB = rawSearchMatches[b.id]?.match_type === 'all_terms' ? 0 : 1;
+                if (isPhraseA !== isPhraseB) return isPhraseB - isPhraseA;
                 const hasWordA = mA.wordCount > 0 ? 1 : 0;
                 const hasWordB = mB.wordCount > 0 ? 1 : 0;
                 if (hasWordA !== hasWordB) return hasWordB - hasWordA;
@@ -1515,8 +1523,7 @@
             });
 
             if (filteredConversations.length === 0 && Object.keys(rawSearchMatches).length > 0) {
-                // Has matches but in internal threads that are hidden
-                container.innerHTML = '<div class="empty-state"><p>No matches with current filters</p><p style="font-size: 12px; color: #666;">Try showing internal threads</p></div>';
+                container.innerHTML = '<div class="empty-state"><p>No matches with current filters</p><p style="font-size: 12px; color: #666;">Try showing agent threads</p></div>';
             } else if (filteredConversations.length === 0) {
                 container.innerHTML = '<div class="empty-state"><p>No matches found</p></div>';
             } else {
@@ -1539,7 +1546,7 @@
                 currentMatchType = 'phrase';
                 currentTokens = [];
                 document.getElementById('thinkingBtn').style.display = 'none';
-                renderConversations(allConversations);
+                renderConversations(filterAgentThreads(allConversations));
                 if (currentConversation) {
                     renderMessages(allMessages);
                 } else {
@@ -1760,53 +1767,13 @@
             }
         }
 
-        async function toggleInternalThreads() {
-            const newState = !showInternalThreads;
-            const btn = document.getElementById('internalBtn');
-            btn.disabled = true; // Prevent double-clicks during fetch
-
-            // Optimistically update UI
-            showInternalThreads = newState;
-            updateToggleUI('internalIcon', 'internalBtnText', newState, '❌', '👁️');
-
-            try {
-                const response = await fetch(`/api/conversations?include_internal=${newState}`);
-                if (!response.ok) throw new Error('Failed to load');
-                const data = await response.json();
-
-                // Only apply if state still matches (not stale response from rapid toggling)
-                if (showInternalThreads === newState) {
-                    allConversations = data;
-
-                    // Clear current conversation if it's no longer in the list
-                    if (currentConversation) {
-                        const stillExists = allConversations.some(c => c.id === currentConversation);
-                        if (!stillExists) {
-                            currentConversation = null;
-                            allMessages = [];
-                            searchResults = [];
-                            document.getElementById('messagesContainer').innerHTML =
-                                '<div class="empty-state"><h2>Select a conversation</h2><p>Choose a conversation from the sidebar to view its messages</p></div>';
-                            document.getElementById('filterBtn').style.display = 'none';
-                            document.getElementById('exportBtn').style.display = 'none';
-                            document.getElementById('resumeBar').classList.remove('show');
-                        }
-                    }
-
-                    // Re-filter search or render conversations
-                    if (searchTerm) {
-                        applySearchFilters();
-                    } else {
-                        renderConversations(allConversations);
-                    }
-                }
-            } catch (error) {
-                console.error('Error toggling internal threads:', error);
-                // Revert state on error
-                showInternalThreads = !newState;
-                updateToggleUI('internalIcon', 'internalBtnText', showInternalThreads, '❌', '👁️');
-            } finally {
-                btn.disabled = false;
+        function toggleAgentThreads() {
+            showAgentThreads = !showAgentThreads;
+            updateToggleUI('agentIcon', 'agentBtnText', showAgentThreads, '❌', '🕵🏻');
+            if (searchTerm) {
+                applySearchFilters();
+            } else {
+                renderConversations(filterAgentThreads(allConversations));
             }
         }
 
