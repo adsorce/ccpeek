@@ -538,7 +538,60 @@
             position: relative;
             white-space: pre-wrap;
         }
-        
+
+        .thinking-content {
+            max-height: 200px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .thinking-content.needs-fade::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 60px;
+            background: linear-gradient(transparent, #1a1f2e);
+            pointer-events: none;
+        }
+
+        .thinking-block.expanded .thinking-content,
+        .thinking-all-expanded .thinking-content {
+            max-height: none;
+            overflow: visible;
+        }
+
+        .thinking-block.expanded .thinking-content::after,
+        .thinking-all-expanded .thinking-content::after {
+            display: none;
+        }
+
+        .thinking-block.expanded .thinking-content.needs-fade ~ .thinking-expand,
+        .thinking-all-expanded .thinking-content.needs-fade ~ .thinking-expand {
+            display: none;
+        }
+
+        .thinking-expand {
+            display: none;
+            text-align: center;
+            margin-top: 4px;
+            cursor: pointer;
+            color: #6b7280;
+            font-size: 14px;
+            font-style: normal;
+            user-select: none;
+            transition: color 0.15s;
+        }
+
+        .thinking-expand:hover {
+            color: #9ca3af;
+        }
+
+        .thinking-content.needs-fade ~ .thinking-expand {
+            display: block;
+        }
+
         .thinking-header {
             font-size: 12px;
             color: #6b7280;
@@ -936,6 +989,7 @@
             document.getElementById('exportBtn').style.display = 'block';
             document.getElementById('filterBtn').style.display = 'block';
             document.getElementById('filterBtnMobile').style.display = 'block';
+            document.getElementById('thinkingBtn').style.display = 'block';
 
             // Show loading
             document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
@@ -996,6 +1050,14 @@
                     toggle.textContent = header.parentElement.classList.contains('collapsed') ? '▶' : '▼';
                 });
             });
+
+            // Mark thinking blocks that overflow 200px so they get the fade + caret
+            container.querySelectorAll('.thinking-content').forEach(el => {
+                el.classList.toggle('needs-fade', el.scrollHeight > 200);
+            });
+
+            // Preserve expand-all state across re-renders
+            container.classList.toggle('thinking-all-expanded', includeThinking);
         }
 
         function stripInlineMarkdown(text) {
@@ -1222,7 +1284,7 @@
                     }
                     if (item.type === 'thinking') {
                         const t = escapeHtml(item.thinking || '');
-                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div>${highlightTerm ? highlightText(t, highlightTerm) : t}</div></div>`;
+                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="this.parentElement.classList.add('expanded')">▼</div></div>`;
                     }
                     if (item.type === 'tool_use') {
                         const tc = highlightJson(JSON.stringify(item.input, null, 2));
@@ -1546,12 +1608,12 @@
                 rawSearchMatches = {};
                 currentMatchType = 'phrase';
                 currentTokens = [];
-                document.getElementById('thinkingBtn').style.display = 'none';
                 renderConversations(filterAgentThreads(allConversations));
                 if (currentConversation) {
                     renderMessages(allMessages);
                 } else {
                     document.getElementById('filterBtn').style.display = 'none';
+                    document.getElementById('thinkingBtn').style.display = 'none';
                 }
                 document.getElementById('searchInfo').style.display = 'none';
                 return;
@@ -1583,7 +1645,6 @@
                 } catch (e) { /* keep existing list */ }
             }
 
-            document.getElementById('thinkingBtn').style.display = 'block';
             document.getElementById('filterBtn').style.display = 'block';
 
             // Apply filters and render
@@ -1763,6 +1824,12 @@
             includeThinking = !includeThinking;
             updateToggleUI('thinkingIcon', 'thinkingBtnText',
                 includeThinking, '❌', '💭');
+            const container = document.getElementById('messagesContainer');
+            container.classList.toggle('thinking-all-expanded', includeThinking);
+            if (!includeThinking) {
+                container.querySelectorAll('.thinking-block.expanded').forEach(
+                    el => el.classList.remove('expanded'));
+            }
             if (searchTerm) {
                 await performSearch(searchTerm);
             }
