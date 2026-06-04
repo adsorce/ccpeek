@@ -1509,6 +1509,7 @@
 
             // Phrase matches tier above all_terms, whole-word above partial, then score * recency
             const now = Date.now() / 1000;
+            const halfLife = 3;
             filteredConversations.sort((a, b) => {
                 const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
                 const isPhraseA = rawSearchMatches[a.id]?.match_type === 'all_terms' ? 0 : 1;
@@ -1517,8 +1518,8 @@
                 const hasWordA = mA.wordCount > 0 ? 1 : 0;
                 const hasWordB = mB.wordCount > 0 ? 1 : 0;
                 if (hasWordA !== hasWordB) return hasWordB - hasWordA;
-                const recencyA = 1 / (1 + ((now - (a.modified || 0)) / 86400) * 0.005);
-                const recencyB = 1 / (1 + ((now - (b.modified || 0)) / 86400) * 0.005);
+                const recencyA = Math.pow(2, -((now - (a.modified || 0)) / 86400) / halfLife);
+                const recencyB = Math.pow(2, -((now - (b.modified || 0)) / 86400) / halfLife);
                 return mB.matchScore * recencyB - mA.matchScore * recencyA;
             });
 
