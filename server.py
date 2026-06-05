@@ -10,6 +10,7 @@ import subprocess
 import shutil
 import re
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse, unquote
 from pathlib import Path
 import socket
@@ -29,6 +30,9 @@ _RE_MD_EMPH = re.compile(r'(?<!\w)(\*{1,3}|_{1,3}|~~)(.*?)\1(?!\w)')
 
 _search_cache = {}
 _search_cache_lock = threading.Lock()
+_conv_cache = {}
+_conv_cache_lock = threading.Lock()
+_conv_cache_ready = threading.Event()
 
 def extract_first_text(content, max_len=100):
     if isinstance(content, str):
@@ -46,8 +50,9 @@ def extract_first_text(content, max_len=100):
         return ''
     return text[:max_len] + ('...' if len(text) > max_len else '') if text else ''
 
-class CCPeekServer(HTTPServer):
+class CCPeekServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = False
+    daemon_threads = True
 
 class CCPeekHandler(SimpleHTTPRequestHandler):
     _path_cache = {}
@@ -93,10 +98,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if current_title is not None:
             return current_title
         if data.get('type') == 'user' and data.get('message'):
-            text = extract_first_text(data['message'].get('content', ''))
-            if text and any(text.startswith(p) for p in CCPeekHandler._INTERNAL_PREFIXES):
-                return None
-            return text
+            return extract_first_text(data['message'].get('content', ''))
         return None
 
     @staticmethod
@@ -109,7 +111,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         so we verify the result exists on disk.
         """
         sep = os.sep
-        # Split on '--' only at the drive letter boundary (first occurrence)
         major = encoded.split('--', 1)
         if len(major) == 2 and len(major[0]) == 1 and major[0].isalpha():
             prefix = major[0].upper() + ':' + sep
@@ -119,11 +120,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             rest = encoded
 
         segments = [s for s in rest.split('-') if s]
-        # Try progressively merging adjacent segments with various joiners
-        # to find a path that actually exists on disk.
-        # '.' covers dot-prefixed dirs like .claude (encoded as -claude after
-        # the preceding segment, producing '--' which split+filter leaves as
-        # adjacent segments).
+
         def resolve(segs, idx, current):
             if idx == len(segs):
                 full = prefix + current
@@ -133,14 +130,23 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             part = segs[idx]
             for joiner in (sep, '-', '_', '.'):
                 next_path = (current + joiner + part) if current else part
-                yield from resolve(segs, idx + 1, next_path)
+                full = prefix + next_path
+                if idx + 1 == len(segs):
+                    if os.path.isdir(full):
+                        yield full
+                elif os.path.exists(full):
+                    yield from resolve(segs, idx + 1, next_path)
             if current:
                 next_path = current + sep + '.' + part
-                yield from resolve(segs, idx + 1, next_path)
+                full = prefix + next_path
+                if idx + 1 == len(segs):
+                    if os.path.isdir(full):
+                        yield full
+                elif os.path.exists(full):
+                    yield from resolve(segs, idx + 1, next_path)
 
         for candidate in resolve(segments, 0, ''):
             return candidate
-        # Fallback: simple dash-to-sep replacement
         return prefix + rest.replace('-', sep)
 
     def _load_job_sessions(self):
@@ -162,78 +168,102 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             pass
         return job_sessions
 
+    @staticmethod
+    def _read_conv_metadata(jsonl_file, claude_dir, project_dir_cache):
+        """Read conversation metadata from a JSONL file."""
+        with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
+            first_line = f.readline()
+            if not first_line:
+                return None
+            data = json.loads(first_line)
+
+            stats = os.stat(jsonl_file)
+
+            f.seek(0)
+            title = "Untitled Conversation"
+            for i, line in enumerate(f):
+                if i >= 50:
+                    break
+                try:
+                    msg_data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                found = CCPeekHandler._extract_title_from_line(msg_data)
+                if found:
+                    title = found
+                    break
+
+            rel = os.path.relpath(jsonl_file, claude_dir)
+            encoded = rel.split(os.sep)[0]
+            if encoded not in project_dir_cache:
+                project_dir_cache[encoded] = CCPeekHandler._decode_project_dir(encoded)
+            project_dir = project_dir_cache[encoded]
+
+            rel_parts = rel.split(os.sep)
+            parent_id = None
+            if 'subagents' in rel_parts:
+                si = rel_parts.index('subagents')
+                if si > 1:
+                    parent_id = rel_parts[si - 1]
+
+            conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
+            is_internal = CCPeekHandler._is_internal_thread(jsonl_file, title)
+
+            return {
+                'id': conv_id,
+                'path': jsonl_file,
+                'project_dir': project_dir,
+                'parent_id': parent_id,
+                'title': title,
+                'is_internal': is_internal,
+                'timestamp': data.get('timestamp', ''),
+                'modified': stats.st_mtime,
+                'size': stats.st_size,
+            }
+
     def handle_conversations(self, include_internal=False):
         """Get list of all conversations"""
+        _conv_cache_ready.wait()
+
         claude_dir = os.path.expanduser('~/.claude/projects')
         conversations = []
         job_sessions = self._load_job_sessions()
 
         if os.path.exists(claude_dir):
-            # Cache decoded project dirs per encoded dirname
             project_dir_cache = {}
+            current_files = set()
             for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
+                current_files.add(jsonl_file)
                 try:
-                    # Get first message to extract metadata
-                    with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
-                        first_line = f.readline()
-                        if first_line:
-                            data = json.loads(first_line)
+                    mtime = os.stat(jsonl_file).st_mtime
+                    cached = _conv_cache.get(jsonl_file)
+                    if cached and cached['modified'] == mtime:
+                        entry = cached
+                    else:
+                        entry = self._read_conv_metadata(
+                            jsonl_file, claude_dir, project_dir_cache)
+                        if not entry:
+                            continue
+                        with _conv_cache_lock:
+                            _conv_cache[jsonl_file] = entry
 
-                            # Get file stats
-                            stats = os.stat(jsonl_file)
+                    if not include_internal and entry.get('is_internal'):
+                        continue
 
-                            # Try to find first user message for title
-                            f.seek(0)
-                            title = "Untitled Conversation"
-                            for line in f:
-                                msg_data = json.loads(line)
-                                found = self._extract_title_from_line(msg_data)
-                                if found:
-                                    title = found
-                                    break
-
-                            # Skip internal threads unless requested
-                            if not include_internal and self._is_internal_thread(jsonl_file, title):
-                                continue
-
-                            # Resolve project directory: walk up from the jsonl
-                            # file to find the first child of the projects/ root.
-                            # Subagents nest as <project>/<uuid>/subagents/agent-*.jsonl
-                            rel = os.path.relpath(jsonl_file, claude_dir)
-                            encoded = rel.split(os.sep)[0]
-                            if encoded not in project_dir_cache:
-                                project_dir_cache[encoded] = self._decode_project_dir(encoded)
-                            project_dir = project_dir_cache[encoded]
-
-                            # Detect parent conversation for subagent threads
-                            rel_parts = rel.split(os.sep)
-                            parent_id = None
-                            if 'subagents' in rel_parts:
-                                si = rel_parts.index('subagents')
-                                if si > 1:
-                                    parent_id = rel_parts[si - 1]
-
-                            conv_id = os.path.basename(jsonl_file).replace('.jsonl', '')
-                            CCPeekHandler._path_cache[conv_id] = jsonl_file
-                            conv = {
-                                'id': conv_id,
-                                'path': jsonl_file,
-                                'project_dir': project_dir,
-                                'parent_id': parent_id,
-                                'title': title,
-                                'timestamp': data.get('timestamp', ''),
-                                'modified': stats.st_mtime,
-                                'size': stats.st_size
-                            }
-                            job = job_sessions.get(conv_id)
-                            if job:
-                                conv['is_background'] = True
-                                conv['job_state'] = job.get('state')
-                            conversations.append(conv)
+                    CCPeekHandler._path_cache[entry['id']] = jsonl_file
+                    conv = {k: v for k, v in entry.items() if k != 'is_internal'}
+                    job = job_sessions.get(entry['id'])
+                    if job:
+                        conv['is_background'] = True
+                        conv['job_state'] = job.get('state')
+                    conversations.append(conv)
                 except Exception as e:
                     print(f"Error reading {jsonl_file}: {e}")
 
-        # Sort by modified time (newest first)
+            with _conv_cache_lock:
+                for stale in set(_conv_cache) - current_files:
+                    del _conv_cache[stale]
+
         conversations.sort(key=lambda x: x['modified'], reverse=True)
 
         self._json_response(conversations)
@@ -1095,6 +1125,23 @@ def main(argv=None):
     if host in {'0.0.0.0', '::'}:
         print("Listening on all network interfaces")
     print("Press Ctrl+C to stop")
+
+    def _prewarm():
+        claude_dir = os.path.expanduser('~/.claude/projects')
+        if not os.path.exists(claude_dir):
+            _conv_cache_ready.set()
+            return
+        pdc = {}
+        for f in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
+            try:
+                entry = CCPeekHandler._read_conv_metadata(f, claude_dir, pdc)
+                if entry:
+                    with _conv_cache_lock:
+                        _conv_cache[f] = entry
+            except Exception:
+                pass
+        _conv_cache_ready.set()
+    threading.Thread(target=_prewarm, daemon=True).start()
 
     if args.open_browser and host in LOCAL_HOSTS:
         threading.Thread(target=open_browser, args=(host if host != 'localhost' else '127.0.0.1', port), daemon=True).start()
