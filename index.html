@@ -239,7 +239,7 @@
             display: none;
             flex-direction: column;
             align-items: center;
-            gap: 3px;
+            gap: 6px;
             position: absolute;
             left: 10px;
             top: 10px;
@@ -261,12 +261,13 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            padding: 15px 10px;
         }
         .match-nav-bar button:hover:not(:disabled) { background: #333; color: #fff; border-color: #777; }
         .match-nav-bar button:disabled { opacity: 0.25; cursor: not-allowed; }
 
         .sidebar-resize {
-            width: 6px;
+            width: 5px;
             cursor: col-resize;
             background: transparent;
             transition: background 0.2s;
@@ -956,8 +957,8 @@
             </div>
             <div class="messages-wrap">
                 <div class="match-nav-bar" id="matchNavBar">
-                    <button onclick="navigateSearch('prev')" id="matchNavPrev" disabled>↑</button>
-                    <button onclick="navigateSearch('next')" id="matchNavNext" disabled>↓</button>
+                    <button onclick="navigateSearch('prev')" id="matchNavPrev" disabled>&#129093;</button>
+                    <button onclick="navigateSearch('next')" id="matchNavNext" disabled>&#129095;</button>
                 </div>
                 <div class="messages-container" id="messagesContainer">
                     <div class="empty-state">
@@ -1018,7 +1019,6 @@
         }
 
         function renderConversations(conversations, searchMatches = {}) {
-            selectedConvIndex = 0;
             const container = document.getElementById('conversationsList');
 
             if (conversations.length === 0) {
@@ -1048,9 +1048,31 @@
                     </div>
                 `;
             }).join('');
+
+            syncSelectedConvIndex();
         }
 
-        async function loadConversation(conversationId) {
+        function syncSelectedConvIndex() {
+            const items = Array.from(document.querySelectorAll('.conversation-item'));
+            if (items.length === 0) {
+                selectedConvIndex = 0;
+                return;
+            }
+
+            const activeIndex = items.findIndex(item => item.getAttribute('data-id') === currentConversation);
+            selectedConvIndex = activeIndex >= 0 ? activeIndex : 0;
+        }
+
+        function scrollConversationIntoView(conversationId, smooth = false) {
+            const item = Array.from(document.querySelectorAll('.conversation-item'))
+                .find(el => el.getAttribute('data-id') === conversationId);
+            if (item) {
+                item.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'nearest' });
+            }
+        }
+
+        async function loadConversation(conversationId, options = {}) {
+            const { scrollSidebar = false, smoothScroll = false } = options;
             if (convAbort) convAbort.abort();
             convAbort = new AbortController();
             const signal = convAbort.signal;
@@ -1061,6 +1083,10 @@
             document.querySelector(`[data-id="${conversationId}"]`)?.classList.add('active');
 
             currentConversation = conversationId;
+            syncSelectedConvIndex();
+            if (scrollSidebar) {
+                scrollConversationIntoView(conversationId, smoothScroll);
+            }
 
             const conv = allConversations.find(c => c.id === conversationId);
             document.getElementById('headerTitle').textContent = conv ? conv.title : '';
@@ -1804,53 +1830,67 @@
         }
 
         function navigateSearch(direction) {
-            if (!searchTerm) return;
+            if (!searchTerm || searchResults.length === 0) return;
 
+            if (direction === 'next' && currentSearchIndex < searchResults.length - 1) {
+                currentSearchIndex++;
+            } else if (direction === 'prev' && currentSearchIndex > 0) {
+                currentSearchIndex--;
+            } else {
+                return;
+            }
+
+            updateSearchInfo();
+            scrollToCurrentMatch(true);
+        }
+
+        function navigateConv(direction) {
             const convIds = getConvList();
             if (convIds.length === 0) return;
 
             if (!currentConversation || !convIds.includes(currentConversation)) {
-                loadConversation(convIds[0]);
+                loadConversation(convIds[0], { scrollSidebar: true, smoothScroll: true });
                 return;
             }
 
             const convIdx = convIds.indexOf(currentConversation);
 
-            if (searchResults.length === 0) {
-                if (direction === 'next' && convIdx < convIds.length - 1) {
-                    loadConversation(convIds[convIdx + 1]);
-                } else if (direction === 'prev' && convIdx > 0) {
-                    loadConversation(convIds[convIdx - 1]);
-                } else if (direction === 'prev') {
+            if (searchTerm && searchResults.length > 0) {
+                if (direction === 'next') {
+                    if (currentSearchIndex < searchResults.length - 1) {
+                        currentSearchIndex++;
+                        updateSearchInfo();
+                        scrollToCurrentMatch(true);
+                        return;
+                    }
+                    if (convIdx < convIds.length - 1) {
+                        loadConversation(convIds[convIdx + 1], { scrollSidebar: true, smoothScroll: true });
+                        return;
+                    }
+                } else {
+                    if (currentSearchIndex > 0) {
+                        currentSearchIndex--;
+                        updateSearchInfo();
+                        scrollToCurrentMatch(true);
+                        return;
+                    }
+                    if (convIdx > 0) {
+                        pendingLastMatch = true;
+                        loadConversation(convIds[convIdx - 1], { scrollSidebar: true, smoothScroll: true });
+                        return;
+                    }
                     document.getElementById('globalSearch').focus();
                 }
                 return;
             }
 
-            if (direction === 'next') {
-                if (currentSearchIndex < searchResults.length - 1) {
-                    currentSearchIndex++;
-                } else if (convIdx < convIds.length - 1) {
-                    loadConversation(convIds[convIdx + 1]);
-                    return;
-                } else {
-                    return;
-                }
-            } else {
-                if (currentSearchIndex > 0) {
-                    currentSearchIndex--;
-                } else if (convIdx > 0) {
-                    pendingLastMatch = true;
-                    loadConversation(convIds[convIdx - 1]);
-                    return;
-                } else {
-                    document.getElementById('globalSearch').focus();
-                    return;
-                }
+            if (direction === 'next' && convIdx < convIds.length - 1) {
+                loadConversation(convIds[convIdx + 1], { scrollSidebar: true, smoothScroll: true });
+            } else if (direction === 'prev' && convIdx > 0) {
+                loadConversation(convIds[convIdx - 1], { scrollSidebar: true, smoothScroll: true });
+            } else if (direction === 'prev') {
+                document.getElementById('globalSearch').focus();
             }
-
-            updateSearchInfo();
-            scrollToCurrentMatch(true);
         }
 
         function updateSearchInfo() {
@@ -1862,13 +1902,16 @@
                 info.style.display = 'flex';
                 const label = `${currentSearchIndex + 1}/${searchResults.length}`;
                 count.textContent = label;
-                const disabled = searchResults.length <= 1;
-                document.getElementById('prevBtn').disabled = disabled;
-                document.getElementById('nextBtn').disabled = disabled;
+
+                const atFirst = currentSearchIndex === 0;
+                const atLast = currentSearchIndex === searchResults.length - 1;
+
+                document.getElementById('prevBtn').disabled = atFirst;
+                document.getElementById('nextBtn').disabled = atLast;
 
                 navBar.classList.add('show');
-                document.getElementById('matchNavPrev').disabled = disabled;
-                document.getElementById('matchNavNext').disabled = disabled;
+                document.getElementById('matchNavPrev').disabled = atFirst;
+                document.getElementById('matchNavNext').disabled = atLast;
             } else {
                 info.style.display = 'none';
                 navBar.classList.remove('show');
@@ -2180,10 +2223,11 @@
         })();
 
         document.addEventListener('keydown', (e) => {
-            if (!searchTerm) return;
             if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
             const active = document.activeElement;
-            if (active && active.tagName === 'TEXTAREA' && active.value.includes('\n')) {
+            const inSearch = active === document.getElementById('globalSearch');
+            if (inSearch && active.value) return;
+            if (active && active.tagName === 'TEXTAREA' && !inSearch && active.value.includes('\n')) {
                 const pos = active.selectionStart;
                 const val = active.value;
                 if (e.key === 'ArrowUp') {
@@ -2195,7 +2239,12 @@
                 }
             }
             e.preventDefault();
-            navigateSearch(e.key === 'ArrowDown' ? 'next' : 'prev');
+            navigateConv(e.key === 'ArrowDown' ? 'next' : 'prev');
+        });
+
+        requestAnimationFrame(() => {
+            const search = document.getElementById('globalSearch');
+            if (search) search.focus({ preventScroll: true });
         });
 
         // Load conversations on page load
