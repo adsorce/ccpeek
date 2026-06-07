@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ccpeek - Claude Chat History Viewer</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><style>path{fill:black}@media(prefers-color-scheme:dark){path{fill:white}}</style><path d='M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z'/></svg>">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/atom-one-dark.min.css">
     <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
@@ -24,9 +25,10 @@
         /* App grid — 2-column layout */
         .app {
             display: grid;
-            grid-template-columns: 280px 1fr;
+            grid-template-columns: var(--sidebar-width, 280px) 1fr;
             grid-template-rows: auto 1fr;
             height: 100vh;
+            position: relative;
         }
 
         /* Row 1: top bar spans full width */
@@ -40,7 +42,7 @@
         }
 
         .top-bar-logo {
-            width: 280px;
+            width: var(--sidebar-width, 280px);
             height: 100%;
             display: flex;
             align-items: center;
@@ -141,6 +143,9 @@
             font-size: 12px;
             color: #888;
             margin: 4px 0;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
         }
 
         .conv-header {
@@ -223,6 +228,57 @@
             color: #4a9eff;
             white-space: nowrap;
         }
+
+        .messages-wrap {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            display: flex;
+        }
+        .match-nav-bar {
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            gap: 3px;
+            position: absolute;
+            left: 10px;
+            top: 10px;
+            z-index: 10;
+            font-size: 14px;
+            color: #888;
+        }
+        .match-nav-bar.show { display: flex; }
+        .match-nav-bar button {
+            background: #1e1e1e;
+            border: 1px solid #555;
+            color: #ccc;
+            width: 32px;
+            height: 28px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .match-nav-bar button:hover:not(:disabled) { background: #333; color: #fff; border-color: #777; }
+        .match-nav-bar button:disabled { opacity: 0.25; cursor: not-allowed; }
+
+        .sidebar-resize {
+            width: 6px;
+            cursor: col-resize;
+            background: transparent;
+            transition: background 0.2s;
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: var(--sidebar-width, 280px);
+            z-index: 20;
+            transform: translateX(-50%);
+        }
+        .sidebar-resize:hover, .sidebar-resize.dragging { background: #4a9eff; }
+        .sidebar-dragging, .sidebar-dragging * { cursor: col-resize !important; user-select: none !important; }
 
         .global-search {
             flex: 1;
@@ -354,7 +410,7 @@
             flex: 1;
             overflow-y: auto;
             padding: 24px clamp(12px, 3vw, 24px);
-            position: relative;
+            min-width: 0;
             font-size: 11pt;
         }
 
@@ -664,15 +720,16 @@
         }
 
         .highlight {
-            background: #fbbf24;
-            color: #000;
+            background: #4a2a0e;
+            color: #ddd;
             padding: 1px 3px;
             border-radius: 3px;
             font-weight: 500;
         }
 
-        .highlight.current {
-            background: #fb923c;
+        .highlight.current, .conversations-list .highlight {
+            background: #fbbf24;
+            color: #000;
         }
 
         .loading {
@@ -777,6 +834,7 @@
                 grid-template-columns: 1fr;
                 grid-template-rows: auto auto 1fr;
             }
+            .sidebar-resize { display: none; }
 
             /* Top bar stacks vertically */
             .top-bar {
@@ -833,6 +891,7 @@
 </head>
 <body>
     <div class="app" id="app">
+        <div class="sidebar-resize" id="sidebarResize"></div>
         <!-- Row 1: top bar -->
         <div class="top-bar">
             <div class="top-bar-logo">
@@ -895,10 +954,16 @@
                     <span class="resume-bar-copy-label" id="resumeCopyLabel"></span>
                 </div>
             </div>
-            <div class="messages-container" id="messagesContainer">
-                <div class="empty-state">
-                    <h2>Select a conversation</h2>
-                    <p>Choose a conversation from the sidebar to view its messages</p>
+            <div class="messages-wrap">
+                <div class="match-nav-bar" id="matchNavBar">
+                    <button onclick="navigateSearch('prev')" id="matchNavPrev" disabled>↑</button>
+                    <button onclick="navigateSearch('next')" id="matchNavNext" disabled>↓</button>
+                </div>
+                <div class="messages-container" id="messagesContainer">
+                    <div class="empty-state">
+                        <h2>Select a conversation</h2>
+                        <p>Choose a conversation from the sidebar to view its messages</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -923,13 +988,16 @@
         let currentSearchIndex = 0;
         let searchTerm = '';
         let selectedConvIndex = 0;
-        let filterToolsEnabled = true; // Start with tools hidden
-        let showAgentThreads = false; // Hide agent/subagent threads by default
+        let filterToolsEnabled = true;
+        let showAgentThreads = false;
         let includeThinking = false;
         let searchDebounceTimer = null;
-        let rawSearchMatches = {}; // Store unfiltered search results for client-side filtering
-        let currentMatchType = 'phrase'; // 'phrase' or 'all_terms'
-        let currentTokens = []; // individual tokens for all_terms matches
+        let rawSearchMatches = {};
+        let currentMatchType = 'phrase';
+        let currentTokens = [];
+        let convAbort = null;
+        let searchAbort = null;
+        let pendingLastMatch = false;
 
         function filterAgentThreads(conversations) {
             if (showAgentThreads) return conversations;
@@ -964,17 +1032,18 @@
                 const matchData = searchMatches[conv.id];
                 const hasMatches = matchData && (typeof matchData === 'object' ? matchData.count > 0 : matchData > 0);
                 const matchCount = matchData ? (typeof matchData === 'object' ? matchData.count : matchData) : 0;
-                const snippet = matchData && typeof matchData === 'object' ? matchData.snippet : '';
+                const rawSnippet = matchData && typeof matchData === 'object' ? matchData.snippet : '';
+                const snippet = centerSnippet(rawSnippet, matchData?.tokens || searchTerm);
 
                 return `
                     <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
                          data-id="${conv.id}"
                          onclick="loadConversation('${conv.id}')">
                         <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
-                        ${hasMatches && snippet ? `<div class="match-snippet truncate">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
+                        ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
-                            ${hasMatches ? `<span class="match-count">${matchCount} matches</span>` : ''}
+                            ${hasMatches ? `<span class="match-count">${matchCount} ${matchData?.wordCount === 0 ? 'partial ' : ''}match${matchCount === 1 ? '' : 'es'}</span>` : ''}
                         </div>
                     </div>
                 `;
@@ -982,7 +1051,10 @@
         }
 
         async function loadConversation(conversationId) {
-            // Update active state
+            if (convAbort) convAbort.abort();
+            convAbort = new AbortController();
+            const signal = convAbort.signal;
+
             document.querySelectorAll('.conversation-item').forEach(item => {
                 item.classList.remove('active');
             });
@@ -1004,15 +1076,16 @@
             document.getElementById('filterBtnMobile').style.display = 'block';
             document.getElementById('thinkingBtn').style.display = 'block';
 
-            // Show loading
             document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
 
             try {
-                const includeInternal = true;
-                const response = await fetch(`/api/conversation/${conversationId}?include_internal=${includeInternal}`);
+                const response = await fetch(
+                    `/api/conversation/${conversationId}?include_internal=true`,
+                    { signal });
                 const data = await response.json();
 
-                // Check for error response from server
+                if (currentConversation !== conversationId) return;
+
                 if (data.error) {
                     let errorMsg = data.error;
                     if (data.conversation_id) {
@@ -1024,10 +1097,8 @@
                 }
 
                 allMessages = data;
-                renderMessages(allMessages);
                 updateResumeBar();
 
-                // Re-apply search highlighting in messages if there's an active search
                 if (searchTerm) {
                     const matchData = rawSearchMatches[conversationId];
                     if (matchData?.match_type === 'all_terms' && matchData.tokens) {
@@ -1038,15 +1109,21 @@
                         currentTokens = [];
                     }
                     updateMessageSearchResults();
+                } else {
+                    renderMessages(allMessages);
                 }
             } catch (error) {
+                if (error.name === 'AbortError') return;
                 console.error('Error loading conversation:', error);
                 document.getElementById('messagesContainer').innerHTML =
                     `<div class="empty-state"><p>Error loading conversation: ${escapeHtml(conversationId)}</p><p style="font-size: 12px; color: #666; margin-top: 8px;">${escapeHtml(error.message || 'Network error')}</p></div>`;
             }
         }
 
+        let globalMatchIndex = 0;
+
         function renderMessages(messages, highlightTerm = '') {
+            globalMatchIndex = 0;
             const container = document.getElementById('messagesContainer');
 
             const messageHtml = messages.map((msg, index) => {
@@ -1133,6 +1210,25 @@
             return result.join('|');
         }
 
+        function centerSnippet(snippet, term) {
+            if (!term || !snippet) return snippet;
+            const tokens = Array.isArray(term) ? term : [term];
+            const stripped = snippet.replace(/^\.{3}/, '').replace(/\.{3}$/, '');
+            const hadLeadingEllipsis = snippet.startsWith('...');
+            const lower = stripped.toLowerCase();
+            let earliest = -1;
+            for (const tok of tokens) {
+                const idx = lower.indexOf(tok.toLowerCase());
+                if (idx !== -1 && (earliest === -1 || idx < earliest)) earliest = idx;
+            }
+            if (earliest === -1) return snippet;
+            const lead = 5;
+            const start = Math.max(0, earliest - lead);
+            let result = stripped.slice(start);
+            if (start > 0 || hadLeadingEllipsis) result = '...' + result;
+            return result;
+        }
+
         function highlightSidebar(html, matchData) {
             const pat = matchData?.tokens
                 ? matchData.tokens.map(escapeRegex).join('|')
@@ -1163,12 +1259,10 @@
             if (!hasNewlines) {
                 const pattern = tagTolerantPattern(entityAwareEscaped(escapeRegex(term)));
                 const regex = new RegExp(`(${pattern})`, 'gi');
-                let matchIndex = 0;
                 return text.replace(regex, (match) => {
-                    const isCurrent = matchIndex === currentSearchIndex;
-                    const cls = `highlight ${isCurrent ? 'current' : ''}`;
-                    const idx = matchIndex;
-                    matchIndex++;
+                    const cls = 'highlight';
+                    const idx = globalMatchIndex;
+                    globalMatchIndex++;
                     return wrapTextSegments(match, cls, idx);
                 });
             }
@@ -1199,13 +1293,11 @@
             }
 
             const regex = new RegExp(parts.join(''), 'gis');
-            let matchIndex = 0;
             return text.replace(regex, function() {
                 const args = arguments;
-                const isCurrent = matchIndex === currentSearchIndex;
-                const cls = `highlight ${isCurrent ? 'current' : ''}`;
-                const idx = matchIndex;
-                matchIndex++;
+                const cls = 'highlight';
+                const idx = globalMatchIndex;
+                globalMatchIndex++;
                 const full = args[0];
                 let result = '';
                 let pos = 0;
@@ -1223,15 +1315,13 @@
         }
 
         function highlightTokens(text, tokens) {
-            let matchIndex = 0;
             const alts = tokens.map(tok =>
                 '\\b' + tagTolerantPattern(entityAwareEscaped(escapeRegex(tok))) + '\\b').join('|');
             const regex = new RegExp(`(${alts})`, 'gi');
             return text.replace(regex, (match) => {
-                const isCurrent = matchIndex === currentSearchIndex;
-                const cls = `highlight ${isCurrent ? 'current' : ''}`;
-                const idx = matchIndex;
-                matchIndex++;
+                const cls = 'highlight';
+                const idx = globalMatchIndex;
+                globalMatchIndex++;
                 return wrapTextSegments(match, cls, idx);
             });
         }
@@ -1297,7 +1387,7 @@
                     }
                     if (item.type === 'thinking') {
                         const t = escapeHtml(item.thinking || '');
-                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="expandThinking(this.parentElement)">▼</div></div>`;
+                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm && includeThinking ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="expandThinking(this.parentElement)">▼</div></div>`;
                     }
                     if (item.type === 'tool_use') {
                         const tc = highlightJson(JSON.stringify(item.input, null, 2));
@@ -1314,8 +1404,8 @@
             const meta = classifyMessage(msg);
             if (meta.isLocalCommand) return '';
 
-            const content = formatContent(msg, meta, highlightTerm);
             const isTool = meta.isToolResult || meta.isToolUse;
+            const content = (isTool && filterToolsEnabled) ? '' : formatContent(msg, meta, highlightTerm);
             const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
 
             let avatar, avatarStyle, roleLabel, cssClass;
@@ -1415,7 +1505,7 @@
 
         function linkifyUrls(html) {
             return html.replace(
-                /(?:<a\s[^>]*>.*?<\/a>)|(?:<code[^>]*>[\s\S]*?<\/code>)|(?:<pre[^>]*>[\s\S]*?<\/pre>)|((?:https?:\/\/|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|dev|io|co|edu|gov|app|build|page|site|world|info)\b)(?:\/[^\s<>"\])]*)?)/gi,
+                /(?:<a\s[^>]*>.*?<\/a>)|(?:<code[^>]*>[\s\S]*?<\/code>)|(?:<pre[^>]*>[\s\S]*?<\/pre>)|(https?:\/\/[^\s<>"\])]+|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|org|net|dev|io|co|edu|gov|app|build|page|site|world|info)\b(?:\/[^\s<>"\])]*)?)/gi,
                 (match, url) => {
                     if (!url) return match;
                     const href = url.match(/^https?:\/\//i) ? url : `https://${url}`;
@@ -1618,6 +1708,7 @@
             document.getElementById('clearSearch').classList.toggle('show', !!searchTerm);
 
             if (!searchTerm) {
+                if (searchAbort) { searchAbort.abort(); searchAbort = null; }
                 rawSearchMatches = {};
                 currentMatchType = 'phrase';
                 currentTokens = [];
@@ -1629,123 +1720,184 @@
                     document.getElementById('thinkingBtn').style.display = 'none';
                 }
                 document.getElementById('searchInfo').style.display = 'none';
+                document.getElementById('matchNavBar').classList.remove('show');
                 return;
             }
 
-            // Show loading state
+            if (searchAbort) searchAbort.abort();
+            searchAbort = new AbortController();
+            const signal = searchAbort.signal;
+            const searchedTerm = searchTerm;
+
             const container = document.getElementById('conversationsList');
             container.innerHTML = '<div class="empty-state"><p>Searching...</p></div>';
 
-            // Search across all conversations via server-side API (always includes internal)
             try {
-                const response = await fetch(`/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}`);
+                const response = await fetch(
+                    `/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}`,
+                    { signal });
                 const data = await response.json();
+                if (searchTerm !== searchedTerm) return;
                 rawSearchMatches = data.matches || {};
             } catch (error) {
+                if (error.name === 'AbortError') return;
                 console.error('Error searching:', error);
                 container.innerHTML = '<div class="empty-state"><p>Search failed</p></div>';
                 return;
             }
 
-            // If search found conversations not in allConversations (e.g. internal
-            // threads with thinking matches), re-fetch the full list so they can render
             const loadedIds = new Set(allConversations.map(c => c.id));
             const hasMissing = Object.keys(rawSearchMatches).some(id => !loadedIds.has(id));
             if (hasMissing) {
                 try {
-                    const resp = await fetch('/api/conversations?include_internal=true');
+                    const resp = await fetch('/api/conversations?include_internal=true', { signal });
                     if (resp.ok) allConversations = await resp.json();
-                } catch (e) { /* keep existing list */ }
+                } catch (e) {
+                    if (e.name === 'AbortError') return;
+                }
             }
 
             document.getElementById('filterBtn').style.display = 'block';
 
-            // Apply filters and render
             applySearchFilters();
         }
 
         function updateMessageSearchResults() {
             if (!currentConversation || allMessages.length === 0) return;
 
-            searchResults = [];
-
             const isTokenMode = currentMatchType === 'all_terms' && currentTokens.length > 1;
-            const regexes = isTokenMode
-                ? currentTokens.map(tok => new RegExp('\\b' + escapeRegex(tok) + '\\b', 'gi'))
-                : [new RegExp(searchTermToPattern(searchTerm), 'gis')];
+            const highlightArg = isTokenMode ? currentTokens : searchTerm;
 
-            allMessages.forEach((msg, msgIndex) => {
-                const msgContent = msg.message?.content;
-                if (!msgContent) return;
+            renderMessages(allMessages, highlightArg);
 
-                const meta = classifyMessage(msg);
-                if (meta.isLocalCommand) return;
-                if (filterToolsEnabled && (meta.isToolResult || meta.isToolUse)) return;
-
-                let content = '';
-                if (typeof msgContent === 'string') {
-                    content = msgContent;
-                } else if (Array.isArray(msgContent)) {
-                    content = msgContent.reduce((acc, item) => {
-                        if (item.type === 'text') return acc + ' ' + (item.text || '');
-                        if (item.type === 'thinking' && includeThinking) return acc + ' ' + (item.thinking || '');
-                        return acc;
-                    }, '');
+            const highlights = document.querySelectorAll('.message:not(.tool-filtered) .highlight[data-match-index]');
+            const seen = new Set();
+            searchResults = [];
+            highlights.forEach(el => {
+                const idx = el.getAttribute('data-match-index');
+                if (!seen.has(idx)) {
+                    seen.add(idx);
+                    const msg = el.closest('.message');
+                    const msgIndex = msg ? parseInt(msg.getAttribute('data-message-index'), 10) : 0;
+                    searchResults.push({ messageIndex: msgIndex });
                 }
-
-                const stripped = stripInlineMarkdown(content);
-                let matchCount = 0;
-                for (const re of regexes) {
-                    const matches = stripped.match(re);
-                    if (matches) matchCount += matches.length;
-                }
-                for (let i = 0; i < matchCount; i++) searchResults.push({ messageIndex: msgIndex });
             });
 
-            const highlightArg = isTokenMode ? currentTokens : searchTerm;
-            if (searchResults.length > 0) {
+            if (pendingLastMatch && searchResults.length > 0) {
+                pendingLastMatch = false;
+                currentSearchIndex = searchResults.length - 1;
+            } else {
                 currentSearchIndex = 0;
+            }
+
+            if (searchResults.length > 0) {
                 updateSearchInfo();
-                renderMessages(allMessages, highlightArg);
                 scrollToCurrentMatch();
             } else {
-                renderMessages(allMessages, highlightArg);
                 document.getElementById('searchInfo').style.display = 'none';
             }
         }
 
+        function getConvList() {
+            return Array.from(document.querySelectorAll('.conversation-item')).map(
+                el => el.getAttribute('data-id'));
+        }
+
         function navigateSearch(direction) {
-            if (searchResults.length === 0) return;
-            
-            if (direction === 'next') {
-                currentSearchIndex = (currentSearchIndex + 1) % searchResults.length;
-            } else {
-                currentSearchIndex = (currentSearchIndex - 1 + searchResults.length) % searchResults.length;
+            if (!searchTerm) return;
+
+            const convIds = getConvList();
+            if (convIds.length === 0) return;
+
+            if (!currentConversation || !convIds.includes(currentConversation)) {
+                loadConversation(convIds[0]);
+                return;
             }
-            
+
+            const convIdx = convIds.indexOf(currentConversation);
+
+            if (searchResults.length === 0) {
+                if (direction === 'next' && convIdx < convIds.length - 1) {
+                    loadConversation(convIds[convIdx + 1]);
+                } else if (direction === 'prev' && convIdx > 0) {
+                    loadConversation(convIds[convIdx - 1]);
+                } else if (direction === 'prev') {
+                    document.getElementById('globalSearch').focus();
+                }
+                return;
+            }
+
+            if (direction === 'next') {
+                if (currentSearchIndex < searchResults.length - 1) {
+                    currentSearchIndex++;
+                } else if (convIdx < convIds.length - 1) {
+                    loadConversation(convIds[convIdx + 1]);
+                    return;
+                } else {
+                    return;
+                }
+            } else {
+                if (currentSearchIndex > 0) {
+                    currentSearchIndex--;
+                } else if (convIdx > 0) {
+                    pendingLastMatch = true;
+                    loadConversation(convIds[convIdx - 1]);
+                    return;
+                } else {
+                    document.getElementById('globalSearch').focus();
+                    return;
+                }
+            }
+
             updateSearchInfo();
-            const highlightArg = currentMatchType === 'all_terms' && currentTokens.length > 1 ? currentTokens : searchTerm;
-            renderMessages(allMessages, highlightArg);
             scrollToCurrentMatch(true);
         }
 
         function updateSearchInfo() {
             const info = document.getElementById('searchInfo');
             const count = document.getElementById('searchCount');
+            const navBar = document.getElementById('matchNavBar');
 
             if (searchResults.length > 0) {
                 info.style.display = 'flex';
-                count.textContent = `${currentSearchIndex + 1}/${searchResults.length}`;
+                const label = `${currentSearchIndex + 1}/${searchResults.length}`;
+                count.textContent = label;
+                const disabled = searchResults.length <= 1;
+                document.getElementById('prevBtn').disabled = disabled;
+                document.getElementById('nextBtn').disabled = disabled;
 
-                document.getElementById('prevBtn').disabled = searchResults.length <= 1;
-                document.getElementById('nextBtn').disabled = searchResults.length <= 1;
+                navBar.classList.add('show');
+                document.getElementById('matchNavPrev').disabled = disabled;
+                document.getElementById('matchNavNext').disabled = disabled;
             } else {
                 info.style.display = 'none';
+                navBar.classList.remove('show');
+            }
+        }
+
+        function applyCurrentHighlight() {
+            document.querySelectorAll('.highlight.current').forEach(el => el.classList.remove('current'));
+            const visible = document.querySelectorAll('.message:not(.tool-filtered) .highlight[data-match-index]');
+            const seen = new Set();
+            const ordered = [];
+            for (const el of visible) {
+                const idx = el.getAttribute('data-match-index');
+                if (!seen.has(idx)) {
+                    seen.add(idx);
+                    ordered.push(idx);
+                }
+            }
+            const targetIdx = ordered[currentSearchIndex];
+            if (targetIdx !== undefined) {
+                visible.forEach(el => {
+                    if (el.getAttribute('data-match-index') === targetIdx) el.classList.add('current');
+                });
             }
         }
 
         function scrollToCurrentMatch(smooth) {
             setTimeout(() => {
+                applyCurrentHighlight();
                 const el = document.querySelector('.message:not(.tool-filtered) .highlight.current');
                 if (el) el.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'center' });
             }, 0);
@@ -1831,6 +1983,29 @@
             document.querySelectorAll('[data-is-tool="true"]').forEach(elem => {
                 elem.classList.toggle('tool-filtered', filterToolsEnabled);
             });
+
+            if (searchTerm && searchResults.length > 0) {
+                const highlights = document.querySelectorAll('.message:not(.tool-filtered) .highlight[data-match-index]');
+                const seen = new Set();
+                searchResults = [];
+                highlights.forEach(el => {
+                    const idx = el.getAttribute('data-match-index');
+                    if (!seen.has(idx)) {
+                        seen.add(idx);
+                        const msg = el.closest('.message');
+                        const msgIndex = msg ? parseInt(msg.getAttribute('data-message-index'), 10) : 0;
+                        searchResults.push({ messageIndex: msgIndex });
+                    }
+                });
+                currentSearchIndex = Math.min(currentSearchIndex, Math.max(0, searchResults.length - 1));
+                if (searchResults.length > 0) {
+                    updateSearchInfo();
+                    applyCurrentHighlight();
+                } else {
+                    document.getElementById('searchInfo').style.display = 'none';
+                    document.getElementById('matchNavBar').classList.remove('show');
+                }
+            }
         }
 
         function expandThinking(block) {
@@ -1947,10 +2122,15 @@
             }
         });
 
-        // Auto-refresh every 30 seconds (skip when searching to preserve filtered results)
-        setInterval(() => {
-            if (!searchTerm) {
-                loadConversations();
+        setInterval(async () => {
+            if (searchTerm) return;
+            const container = document.getElementById('conversationsList');
+            const scrollTop = container.scrollTop;
+            const activeId = currentConversation;
+            await loadConversations();
+            container.scrollTop = scrollTop;
+            if (activeId) {
+                document.querySelector(`[data-id="${activeId}"]`)?.classList.add('active');
             }
         }, 30000);
 
@@ -1962,6 +2142,60 @@
             } else {
                 showConversationList();
             }
+        });
+
+        // Sidebar resize
+        (function() {
+            const handle = document.getElementById('sidebarResize');
+            const app = document.querySelector('.app');
+            function setSidebarWidth(w) {
+                app.style.setProperty('--sidebar-width', w + 'px');
+                handle.style.left = w + 'px';
+            }
+            const saved = localStorage.getItem('sidebarWidth');
+            if (saved) setSidebarWidth(parseInt(saved));
+
+            let dragging = false;
+            handle.addEventListener('mousedown', (e) => {
+                dragging = true;
+                handle.classList.add('dragging');
+                document.body.classList.add('sidebar-dragging');
+                e.preventDefault();
+                e.stopPropagation();
+            });
+            handle.addEventListener('dragstart', (e) => e.preventDefault());
+            document.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                e.preventDefault();
+                setSidebarWidth(Math.max(200, Math.min(600, e.clientX)));
+            });
+            document.addEventListener('mouseup', () => {
+                if (!dragging) return;
+                dragging = false;
+                handle.classList.remove('dragging');
+                document.body.classList.remove('sidebar-dragging');
+                localStorage.setItem('sidebarWidth',
+                    parseInt(getComputedStyle(app).getPropertyValue('--sidebar-width')));
+            });
+        })();
+
+        document.addEventListener('keydown', (e) => {
+            if (!searchTerm) return;
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+            const active = document.activeElement;
+            if (active && active.tagName === 'TEXTAREA' && active.value.includes('\n')) {
+                const pos = active.selectionStart;
+                const val = active.value;
+                if (e.key === 'ArrowUp') {
+                    const beforeCursor = val.slice(0, pos);
+                    if (beforeCursor.includes('\n')) return;
+                } else {
+                    const afterCursor = val.slice(pos);
+                    if (afterCursor.includes('\n')) return;
+                }
+            }
+            e.preventDefault();
+            navigateSearch(e.key === 'ArrowDown' ? 'next' : 'prev');
         });
 
         // Load conversations on page load

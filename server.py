@@ -27,6 +27,12 @@ _RE_MD_FENCED = re.compile(r'```[^\n]*\n(.*?)```', re.DOTALL)
 _RE_MD_INLINE = re.compile(r'`([^`]+)`')
 _RE_MD_LINK = re.compile(r'\[([^\]]+)\]\([^)]+\)')
 _RE_MD_EMPH = re.compile(r'(?<!\w)(\*{1,3}|_{1,3}|~~)(.*?)\1(?!\w)')
+_META_TAGS = ('local-command-caveat', 'command-name', 'command-message', 'command-args',
+              'local-command-stdout', 'local-command-stderr', 'system-reminder')
+_RE_META_TAGS = re.compile(
+    r'<(?:' + '|'.join(re.escape(t) for t in _META_TAGS) +
+    r')[^>]*>.*?</(?:' + '|'.join(re.escape(t) for t in _META_TAGS) +
+    r')>\s*', re.DOTALL)
 
 _search_cache = {}
 _search_cache_lock = threading.Lock()
@@ -34,7 +40,7 @@ _conv_cache = {}
 _conv_cache_lock = threading.Lock()
 _conv_cache_ready = threading.Event()
 
-def extract_first_text(content, max_len=100):
+def extract_first_text(content, max_len=200):
     if isinstance(content, str):
         text = content
     elif isinstance(content, list):
@@ -48,7 +54,11 @@ def extract_first_text(content, max_len=100):
                 break
     else:
         return ''
-    return text[:max_len] + ('...' if len(text) > max_len else '') if text else ''
+    if not text:
+        return ''
+    if max_len and len(text) > max_len:
+        return text[:max_len] + '...'
+    return text
 
 class CCPeekServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = False
@@ -98,7 +108,11 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if current_title is not None:
             return current_title
         if data.get('type') == 'user' and data.get('message'):
-            return extract_first_text(data['message'].get('content', ''))
+            raw = extract_first_text(data['message'].get('content', ''), max_len=0)
+            if raw:
+                stripped = _RE_META_TAGS.sub('', raw).strip()
+                if stripped:
+                    return stripped[:200] + ('...' if len(stripped) > 200 else '')
         return None
 
     @staticmethod
@@ -222,50 +236,26 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             }
 
     def handle_conversations(self, include_internal=False):
-        """Get list of all conversations"""
+        """Serve conversations from the background-refreshed cache."""
         _conv_cache_ready.wait()
 
-        claude_dir = os.path.expanduser('~/.claude/projects')
         conversations = []
         job_sessions = self._load_job_sessions()
 
-        if os.path.exists(claude_dir):
-            project_dir_cache = {}
-            current_files = set()
-            for jsonl_file in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
-                current_files.add(jsonl_file)
-                try:
-                    mtime = os.stat(jsonl_file).st_mtime
-                    cached = _conv_cache.get(jsonl_file)
-                    if cached and cached['modified'] == mtime:
-                        entry = cached
-                    else:
-                        entry = self._read_conv_metadata(
-                            jsonl_file, claude_dir, project_dir_cache)
-                        if not entry:
-                            continue
-                        with _conv_cache_lock:
-                            _conv_cache[jsonl_file] = entry
+        with _conv_cache_lock:
+            entries = list(_conv_cache.values())
 
-                    if not include_internal and entry.get('is_internal'):
-                        continue
-
-                    CCPeekHandler._path_cache[entry['id']] = jsonl_file
-                    conv = {k: v for k, v in entry.items() if k != 'is_internal'}
-                    job = job_sessions.get(entry['id'])
-                    if job:
-                        conv['is_background'] = True
-                        conv['job_state'] = job.get('state')
-                    conversations.append(conv)
-                except Exception as e:
-                    print(f"Error reading {jsonl_file}: {e}")
-
-            with _conv_cache_lock:
-                for stale in set(_conv_cache) - current_files:
-                    del _conv_cache[stale]
+        for entry in entries:
+            if not include_internal and entry.get('is_internal'):
+                continue
+            conv = {k: v for k, v in entry.items() if k != 'is_internal'}
+            job = job_sessions.get(entry['id'])
+            if job:
+                conv['is_background'] = True
+                conv['job_state'] = job.get('state')
+            conversations.append(conv)
 
         conversations.sort(key=lambda x: x['modified'], reverse=True)
-
         self._json_response(conversations)
 
     def handle_conversation(self, conversation_id, include_internal=False):
@@ -366,27 +356,65 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             return ('', json.dumps(content), '')
         return (str(content), '', '')
 
-    def _create_snippet(self, text, match_pos, max_len=80):
+    def _create_snippet(self, text, match_pos, max_len=200):
         """Create a snippet around the match position."""
-        # Calculate context window
-        context_before = 30
+        context_before = 60
         context_after = max_len - context_before - 10
 
         start = max(0, match_pos - context_before)
         end = min(len(text), match_pos + context_after)
 
         snippet = text[start:end]
-
-        # Clean up whitespace
         snippet = ' '.join(snippet.split())
 
-        # Add ellipsis if truncated
         if start > 0:
             snippet = '...' + snippet
         if end < len(text):
             snippet = snippet + '...'
 
         return snippet
+
+    def _snippet_from_parts(self, parts, pattern, max_len=200):
+        """Find the message part containing the first match and snippet from it alone."""
+        for part in parts:
+            m = pattern.search(part)
+            if m:
+                return self._create_snippet(part, m.start(), max_len)
+        return ''
+
+    def _token_snippet_from_parts(self, parts, token_patterns, max_len=200):
+        """Find the message part containing the rarest token and snippet from it."""
+        for part in parts:
+            all_present = all(p.search(part) for _tok, p, _wp in token_patterns)
+            if not all_present:
+                continue
+            rarest_match = None
+            rarest_count = float('inf')
+            for _tok, p, _wp in token_patterns:
+                m = p.search(part)
+                if m:
+                    count = len(p.findall(part))
+                    if count < rarest_count:
+                        rarest_count = count
+                        rarest_match = m
+            if rarest_match:
+                return self._create_snippet(part, rarest_match.start(), max_len)
+        # Fallback: find any part with any token
+        rarest_match = None
+        rarest_count = float('inf')
+        best_part = None
+        for part in parts:
+            for _tok, p, _wp in token_patterns:
+                m = p.search(part)
+                if m:
+                    count = len(p.findall(part))
+                    if count < rarest_count:
+                        rarest_count = count
+                        rarest_match = m
+                        best_part = part
+        if rarest_match and best_part:
+            return self._create_snippet(best_part, rarest_match.start(), max_len)
+        return ''
 
     @staticmethod
     def _is_internal_thread(jsonl_path, first_user_title=None):
@@ -443,7 +471,9 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 i = j
         inner = ''.join(result)
         pattern = re.compile(inner, re.IGNORECASE | re.DOTALL)
-        word_pattern = re.compile(r'\b' + inner + r'\b', re.IGNORECASE | re.DOTALL)
+        left = r'\b' if re.match(r'\w', search_term[0]) else r'(?<!\w)'
+        right = r'\b' if re.match(r'\w', search_term[-1]) else r'(?!\w)'
+        word_pattern = re.compile(left + inner + right, re.IGNORECASE | re.DOTALL)
         return pattern, word_pattern
 
     @staticmethod
@@ -507,8 +537,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 continue
 
             entry = {
-                'text': ' '.join(text_parts),
-                'thinking': ' '.join(thinking_parts),
+                'text_parts': text_parts,
+                'thinking_parts': thinking_parts,
                 'mtime': mtime,
                 'path': jsonl_file,
                 'is_internal': CCPeekHandler._is_internal_thread(
@@ -532,7 +562,9 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         for tok in tokens:
             escaped = re.escape(tok)
             p = re.compile(escaped, re.IGNORECASE)
-            wp = re.compile(r'\b' + escaped + r'\b', re.IGNORECASE)
+            left = r'\b' if re.match(r'\w', tok[0]) else r'(?<!\w)'
+            right = r'\b' if re.match(r'\w', tok[-1]) else r'(?!\w)'
+            wp = re.compile(left + escaped + right, re.IGNORECASE)
             patterns.append((tok, p, wp))
         return patterns
 
@@ -547,7 +579,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             word_total += len(wp.findall(text))
         return total, word_total
 
-    def _token_snippet(self, text, token_patterns, max_len=80):
+    def _token_snippet(self, text, token_patterns, max_len=200):
         rarest_tok = None
         rarest_count = float('inf')
         rarest_match = None
@@ -586,27 +618,29 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             items = list(_search_cache.items())
 
         for conv_id, entry in items:
-            text_found = pattern.findall(entry['text'])
+            text_blob = ' '.join(entry['text_parts'])
+            thinking_blob = ' '.join(entry['thinking_parts'])
+
+            text_found = pattern.findall(text_blob)
             text_count = len(text_found)
-            text_word_count = len(word_pattern.findall(entry['text'])) if text_count else 0
+            text_word_count = len(word_pattern.findall(text_blob)) if text_count else 0
 
             thinking_count = 0
             thinking_word_count = 0
-            if include_thinking and entry['thinking']:
-                thinking_found = pattern.findall(entry['thinking'])
+            if include_thinking and thinking_blob:
+                thinking_found = pattern.findall(thinking_blob)
                 thinking_count = len(thinking_found)
                 thinking_word_count = (
-                    len(word_pattern.findall(entry['thinking'])) if thinking_count else 0)
+                    len(word_pattern.findall(thinking_blob)) if thinking_count else 0)
 
             if text_count or thinking_count:
                 snippet = None
-                m = pattern.search(entry['text'])
-                if m:
-                    snippet = self._create_snippet(entry['text'], m.start())
-                elif include_thinking and entry['thinking']:
-                    m = pattern.search(entry['thinking'])
-                    if m:
-                        snippet = self._create_snippet(entry['thinking'], m.start())
+                if text_count:
+                    snippet = self._snippet_from_parts(
+                        entry['text_parts'], pattern)
+                if not snippet and thinking_count:
+                    snippet = self._snippet_from_parts(
+                        entry['thinking_parts'], pattern)
 
                 matches[conv_id] = {
                     'text_count': text_count,
@@ -621,11 +655,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             if not token_patterns:
                 continue
 
-            text_tok = self._token_search(entry['text'], token_patterns)
+            text_tok = self._token_search(text_blob, token_patterns)
             think_tok = None
-            if include_thinking and entry['thinking']:
-                think_tok = self._token_search(
-                    entry['thinking'], token_patterns)
+            if include_thinking and thinking_blob:
+                think_tok = self._token_search(thinking_blob, token_patterns)
 
             if not text_tok and not think_tok:
                 continue
@@ -633,11 +666,12 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             t_count, t_wcount = text_tok or (0, 0)
             th_count, th_wcount = think_tok or (0, 0)
 
-            snippet = self._token_snippet(
-                entry['text'], token_patterns) if text_tok else ''
+            snippet = self._token_snippet_from_parts(
+                entry['text_parts'],
+                token_patterns) if text_tok else ''
             if not snippet and think_tok:
-                snippet = self._token_snippet(
-                    entry['thinking'], token_patterns)
+                snippet = self._token_snippet_from_parts(
+                    entry['thinking_parts'], token_patterns)
 
             matches[conv_id] = {
                 'text_count': t_count,
@@ -1126,22 +1160,34 @@ def main(argv=None):
         print("Listening on all network interfaces")
     print("Press Ctrl+C to stop")
 
-    def _prewarm():
+    def _refresh_conv_cache():
         claude_dir = os.path.expanduser('~/.claude/projects')
-        if not os.path.exists(claude_dir):
+        while True:
+            if os.path.exists(claude_dir):
+                pdc = {}
+                current_files = set()
+                for f in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
+                    current_files.add(f)
+                    try:
+                        mtime = os.stat(f).st_mtime
+                        cached = _conv_cache.get(f)
+                        if (cached and cached['modified'] == mtime
+                                and not cached.get('title', '').startswith('<')):
+                            CCPeekHandler._path_cache[cached['id']] = f
+                            continue
+                        entry = CCPeekHandler._read_conv_metadata(f, claude_dir, pdc)
+                        if entry:
+                            with _conv_cache_lock:
+                                _conv_cache[f] = entry
+                            CCPeekHandler._path_cache[entry['id']] = f
+                    except Exception:
+                        pass
+                with _conv_cache_lock:
+                    for stale in set(_conv_cache) - current_files:
+                        del _conv_cache[stale]
             _conv_cache_ready.set()
-            return
-        pdc = {}
-        for f in glob.glob(os.path.join(claude_dir, '**/*.jsonl'), recursive=True):
-            try:
-                entry = CCPeekHandler._read_conv_metadata(f, claude_dir, pdc)
-                if entry:
-                    with _conv_cache_lock:
-                        _conv_cache[f] = entry
-            except Exception:
-                pass
-        _conv_cache_ready.set()
-    threading.Thread(target=_prewarm, daemon=True).start()
+            time.sleep(10)
+    threading.Thread(target=_refresh_conv_cache, daemon=True).start()
 
     if args.open_browser and host in LOCAL_HOSTS:
         threading.Thread(target=open_browser, args=(host if host != 'localhost' else '127.0.0.1', port), daemon=True).start()
