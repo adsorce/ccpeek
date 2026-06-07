@@ -80,11 +80,50 @@
         }
 
         /* Row 2 col 1: conversation list */
+        .conversations-pane {
+            position: relative;
+            overflow: hidden;
+            background: #171717;
+            border-right: 1px solid #2a2a2a;
+        }
+
         .conversations-list {
+            height: 100%;
             overflow-y: auto;
             padding: 8px;
             background: #171717;
-            border-right: 1px solid #2a2a2a;
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+        }
+
+        .conversations-list::-webkit-scrollbar {
+            width: 0;
+            height: 0;
+        }
+
+        .sidebar-scrollbar {
+            position: absolute;
+            top: 8px;
+            right: 0;
+            bottom: 8px;
+            width: 8px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 140ms ease;
+        }
+
+        .conversations-pane.show-scrollbar .sidebar-scrollbar.visible {
+            opacity: 1;
+        }
+
+        .sidebar-scrollbar-thumb {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 8px;
+            border-radius: 4px;
+            background: #3a3a3a;
+            transition: background-color 140ms ease;
         }
 
         /* Row 2 col 2: main panel */
@@ -120,6 +159,47 @@
         .conversation-title {
             font-size: 14px;
             margin-bottom: 4px;
+        }
+
+        .conversation-title-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+            min-width: 0;
+        }
+
+        .conversation-title-row .conversation-title {
+            margin-bottom: 0;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .source-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            padding: 3px 7px 2px;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            white-space: nowrap;
+            border: 1px solid transparent;
+            flex-shrink: 0;
+        }
+
+        .source-badge.claude {
+            background: #2d241d;
+            color: #e6b98a;
+            border-color: #5c4533;
+        }
+
+        .source-badge.codex {
+            background: #142333;
+            color: #79c7ff;
+            border-color: #294865;
         }
 
         .conversation-meta {
@@ -686,7 +766,7 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            cursor: pointer;
+            cursor: default;
             user-select: none;
         }
 
@@ -699,8 +779,6 @@
             font-size: 13px;
             color: #a8a8a8;
             padding: 12px;
-            max-height: 300px;
-            overflow-y: auto;
             white-space: pre-wrap;
         }
 
@@ -782,6 +860,10 @@
 
         ::-webkit-scrollbar-thumb:hover {
             background: #4a4a4a;
+        }
+
+        .sidebar-scrollbar-thumb:hover {
+            background-color: rgba(74, 74, 74, 1);
         }
 
         /* Keyboard shortcuts help */
@@ -870,10 +952,10 @@
             }
 
             /* List */
-            .conversations-list { border-right: none; }
+            .conversations-pane { border-right: none; }
 
             /* Viewing a conversation: swap list for messages */
-            .app.viewing-conv .conversations-list { display: none; }
+            .app.viewing-conv .conversations-pane { display: none; }
             .app.viewing-conv .top-bar { display: none; }
             .app.viewing-conv .main-panel { display: flex; }
             .app.viewing-conv .conv-header { display: flex; }
@@ -930,8 +1012,13 @@
         </div>
 
         <!-- Row 2: list + conversation -->
-        <div class="conversations-list" id="conversationsList">
-            <div class="loading">Loading conversations...</div>
+        <div class="conversations-pane" id="conversationsPane">
+            <div class="conversations-list" id="conversationsList">
+                <div class="loading">Loading conversations...</div>
+            </div>
+            <div class="sidebar-scrollbar" id="sidebarScrollbar">
+                <div class="sidebar-scrollbar-thumb" id="sidebarScrollbarThumb"></div>
+            </div>
         </div>
 
         <div class="main-panel">
@@ -999,22 +1086,55 @@
         let convAbort = null;
         let searchAbort = null;
         let pendingLastMatch = false;
+        let conversationListEtag = '';
 
         function filterAgentThreads(conversations) {
             if (showAgentThreads) return conversations;
             return conversations.filter(c => !c.parent_id);
         }
 
+        function getSourceLabel(source) {
+            return source === 'codex' ? 'Codex' : 'Claude';
+        }
+
+        function renderSourceBadge(source) {
+            const cls = source === 'codex' ? 'codex' : 'claude';
+            return `<span class="source-badge ${cls}">${escapeHtml(getSourceLabel(source))}</span>`;
+        }
+
+        function updateHeaderTitle(conv) {
+            const title = document.getElementById('headerTitle');
+            if (!conv) {
+                title.textContent = '';
+                return;
+            }
+            title.innerHTML = `${escapeHtml(conv.title)} ${renderSourceBadge(conv.source)}`;
+        }
+
         // Load conversations on startup
         async function loadConversations() {
             try {
-                const response = await fetch('/api/conversations?include_internal=true');
-                allConversations = await response.json();
-                renderConversations(filterAgentThreads(allConversations));
+                const headers = conversationListEtag
+                    ? { 'If-None-Match': conversationListEtag }
+                    : {};
+                const response = await fetch('/api/conversations?include_internal=true', { headers });
+                if (response.status === 304) {
+                    return false;
+                }
+                const nextConversations = await response.json();
+                const changed = true;
+                conversationListEtag = response.headers.get('ETag') || '';
+                allConversations = nextConversations;
+                if (changed) {
+                    renderConversations(filterAgentThreads(allConversations));
+                }
+                return changed;
             } catch (error) {
                 console.error('Error loading conversations:', error);
+                conversationListEtag = '';
                 document.getElementById('conversationsList').innerHTML =
                     '<div class="empty-state"><p>Error loading conversations</p></div>';
+                return true;
             }
         }
 
@@ -1023,6 +1143,7 @@
 
             if (conversations.length === 0) {
                 container.innerHTML = '<div class="empty-state"><p>No conversations found</p></div>';
+                requestAnimationFrame(updateSidebarScrollbar);
                 return;
             }
 
@@ -1039,7 +1160,10 @@
                     <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
                          data-id="${conv.id}"
                          onclick="loadConversation('${conv.id}')">
-                        <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
+                        <div class="conversation-title-row">
+                            <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
+                            ${renderSourceBadge(conv.source)}
+                        </div>
                         ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
@@ -1050,6 +1174,7 @@
             }).join('');
 
             syncSelectedConvIndex();
+            requestAnimationFrame(updateSidebarScrollbar);
         }
 
         function syncSelectedConvIndex() {
@@ -1068,7 +1193,35 @@
                 .find(el => el.getAttribute('data-id') === conversationId);
             if (item) {
                 item.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'nearest' });
+                requestAnimationFrame(updateSidebarScrollbar);
             }
+        }
+
+        function updateSidebarScrollbar() {
+            const container = document.getElementById('conversationsList');
+            const scrollbar = document.getElementById('sidebarScrollbar');
+            const thumb = document.getElementById('sidebarScrollbarThumb');
+            if (!container || !scrollbar || !thumb) return;
+
+            const visibleHeight = container.clientHeight;
+            const totalHeight = container.scrollHeight;
+            const scrollable = totalHeight - visibleHeight;
+
+            if (scrollable <= 0 || visibleHeight <= 0) {
+                scrollbar.classList.remove('visible');
+                thumb.style.height = '0';
+                thumb.style.transform = 'translateY(0)';
+                return;
+            }
+
+            const trackHeight = scrollbar.clientHeight;
+            const thumbHeight = Math.max(24, Math.round(trackHeight * (visibleHeight / totalHeight)));
+            const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+            const thumbTop = Math.round((container.scrollTop / scrollable) * maxThumbTop);
+
+            thumb.style.height = `${thumbHeight}px`;
+            thumb.style.transform = `translateY(${thumbTop}px)`;
+            scrollbar.classList.add('visible');
         }
 
         async function loadConversation(conversationId, options = {}) {
@@ -1089,7 +1242,7 @@
             }
 
             const conv = allConversations.find(c => c.id === conversationId);
-            document.getElementById('headerTitle').textContent = conv ? conv.title : '';
+            updateHeaderTitle(conv);
 
             if (isMobile()) {
                 document.getElementById('app').classList.add('viewing-conv');
@@ -1100,7 +1253,7 @@
             document.getElementById('exportBtn').style.display = 'block';
             document.getElementById('filterBtn').style.display = 'block';
             document.getElementById('filterBtnMobile').style.display = 'block';
-            document.getElementById('thinkingBtn').style.display = 'block';
+            document.getElementById('thinkingBtn').style.display = 'none';
 
             document.getElementById('messagesContainer').innerHTML = '<div class="loading">Loading messages...</div>';
 
@@ -1124,6 +1277,8 @@
 
                 allMessages = data;
                 updateResumeBar();
+                document.getElementById('thinkingBtn').style.display =
+                    allMessages.some(msg => msg.kind === 'thinking' && !msg.hidden_by_default) ? 'block' : 'none';
 
                 if (searchTerm) {
                     const matchData = rawSearchMatches[conversationId];
@@ -1158,15 +1313,6 @@
 
             container.innerHTML = messageHtml || '<div class="empty-state"><p>No messages in this conversation</p></div>';
             
-            // Add tool use toggle functionality
-            document.querySelectorAll('.tool-use-header').forEach(header => {
-                header.addEventListener('click', () => {
-                    header.parentElement.classList.toggle('collapsed');
-                    const toggle = header.querySelector('.tool-use-toggle');
-                    toggle.textContent = header.parentElement.classList.contains('collapsed') ? '▶' : '▼';
-                });
-            });
-
             // Mark thinking blocks that overflow 200px so they get the fade + caret
             container.querySelectorAll('.thinking-content').forEach(el => {
                 el.classList.toggle('needs-fade', el.scrollHeight > 200);
@@ -1352,83 +1498,63 @@
             });
         }
 
+        function stringifyPayload(payload, pretty = false) {
+            if (payload === null || payload === undefined) return '';
+            if (typeof payload === 'string') return payload;
+            try {
+                return JSON.stringify(payload, null, pretty ? 2 : 0);
+            } catch {
+                return String(payload);
+            }
+        }
+
         function classifyMessage(msg) {
-            const message = msg.message;
-            const content = message?.content;
-            const isUser = msg.type === 'user';
-
-            let isToolResult = false;
-            let isToolUse = false;
-            let toolName = '';
-            let isLocalCommand = false;
-
-            if (isUser && typeof content === 'string') {
-                isLocalCommand = content.includes('<command-name>') ||
-                    content.includes('<local-command-stdout>') ||
-                    content.includes('Caveat: The messages below were generated by the user while running local commands');
-            }
-            if (Array.isArray(content)) {
-                isToolResult = isUser && content.some(item => item.type === 'tool_result');
-                const toolUseItem = !isUser && content.find(item => item.type === 'tool_use');
-                if (toolUseItem) {
-                    isToolUse = true;
-                    toolName = toolUseItem.name || 'Tool Use';
-                }
-            }
-
-            return { isUser, isToolResult, isToolUse, toolName, isLocalCommand };
+            return {
+                isUser: msg.role === 'user',
+                isDeveloper: msg.role === 'developer',
+                isThinking: msg.kind === 'thinking',
+                isCommentary: msg.kind === 'commentary',
+                isToolResult: msg.kind === 'tool_result',
+                isToolUse: msg.kind === 'tool_use',
+                toolName: msg.name || 'Tool Use',
+            };
         }
 
         function formatContent(msg, meta, highlightTerm) {
-            const content = msg.message?.content;
-            if (!content) return '';
-
-            if (meta.isToolResult && Array.isArray(content)) {
-                return content.map(item => {
-                    if (item.type !== 'tool_result') return '';
-                    const raw = item.content || '';
-                    const isObj = typeof raw !== 'string';
-                    const toolContent = isObj
-                        ? highlightJson(JSON.stringify(raw, null, 2))
-                        : escapeHtml(raw);
-                    const highlighted = highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent;
-                    return `<div class="tool-use"><div class="tool-use-header"><span>Tool Result${item.tool_use_id ? ` (${item.tool_use_id.slice(-8)})` : ''}</span><span class="tool-use-toggle">▼</span></div><div class="tool-use-content">${highlighted}</div></div>`;
-                }).join('');
+            if (meta.isToolResult) {
+                const raw = msg.payload ?? '';
+                const isObj = typeof raw !== 'string';
+                const toolContent = isObj
+                    ? highlightJson(JSON.stringify(raw, null, 2))
+                    : escapeHtml(raw);
+                const highlighted = highlightTerm ? highlightText(toolContent, highlightTerm) : toolContent;
+                return `<div class="tool-use"><div class="tool-use-header"><span>Tool Result</span></div><div class="tool-use-content">${highlighted}</div></div>`;
             }
 
-            if (typeof content === 'string') {
-                const processed = meta.isUser
-                    ? linkifyUrls(escapeHtml(content))
-                    : formatMarkdown(escapeHtml(content));
-                return highlightTerm ? highlightText(processed, highlightTerm) : processed;
+            if (meta.isToolUse) {
+                const payloadText = stringifyPayload(msg.payload ?? {}, true);
+                const tc = typeof msg.payload === 'string'
+                    ? escapeHtml(payloadText)
+                    : highlightJson(payloadText);
+                const highlighted = highlightTerm ? highlightText(tc, highlightTerm) : tc;
+                return `<div class="tool-use"><div class="tool-use-header"><span>${escapeHtml(msg.name || 'Tool Use')}</span></div><div class="tool-use-content">${highlighted}</div></div>`;
             }
 
-            if (Array.isArray(content)) {
-                return content.map(item => {
-                    if (item.type === 'text') {
-                        const text = meta.isUser
-                            ? linkifyUrls(escapeHtml(item.text || ''))
-                            : formatMarkdown(escapeHtml(item.text || ''));
-                        return highlightTerm ? highlightText(text, highlightTerm) : text;
-                    }
-                    if (item.type === 'thinking') {
-                        const t = escapeHtml(item.thinking || '');
-                        return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm && includeThinking ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="expandThinking(this.parentElement)">▼</div></div>`;
-                    }
-                    if (item.type === 'tool_use') {
-                        const tc = highlightJson(JSON.stringify(item.input, null, 2));
-                        return `<div class="tool-use collapsed"><div class="tool-use-header"><span>${escapeHtml(item.name || 'Tool Use')}</span><span class="tool-use-toggle">▶</span></div><div class="tool-use-content">${highlightTerm ? highlightText(tc, highlightTerm) : tc}</div></div>`;
-                    }
-                    return '';
-                }).join('');
+            if (meta.isThinking) {
+                const t = escapeHtml(msg.text || '');
+                return `<div class="thinking-block"><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${highlightTerm && includeThinking ? highlightText(t, highlightTerm) : t}</div><div class="thinking-expand" onclick="expandThinking(this.parentElement)">▼</div></div>`;
             }
-            return '';
+
+            const text = msg.text || '';
+            const processed = meta.isUser
+                ? linkifyUrls(escapeHtml(text))
+                : formatMarkdown(escapeHtml(text));
+            return highlightTerm ? highlightText(processed, highlightTerm) : processed;
         }
 
         function renderMessage(msg, index, highlightTerm) {
-            if (!msg.message) return '';
+            if (msg.hidden_by_default) return '';
             const meta = classifyMessage(msg);
-            if (meta.isLocalCommand) return '';
 
             const isTool = meta.isToolResult || meta.isToolUse;
             const content = (isTool && filterToolsEnabled) ? '' : formatContent(msg, meta, highlightTerm);
@@ -1444,9 +1570,15 @@
             } else if (meta.isUser) {
                 avatar = 'U'; avatarStyle = '';
                 roleLabel = 'User'; cssClass = 'user';
+            } else if (meta.isDeveloper) {
+                avatar = 'D'; avatarStyle = '';
+                roleLabel = 'Developer'; cssClass = 'assistant';
             } else {
-                avatar = 'C'; avatarStyle = '';
-                roleLabel = 'Claude'; cssClass = 'assistant';
+                avatar = msg.source === 'codex' ? 'O' : 'C'; avatarStyle = '';
+                roleLabel = meta.isCommentary
+                    ? `${getSourceLabel(msg.source)} Commentary`
+                    : getSourceLabel(msg.source);
+                cssClass = 'assistant';
             }
 
             const filterClass = isTool && filterToolsEnabled ? 'tool-filtered' : '';
@@ -1603,7 +1735,7 @@
                 return;
             }
             const conv = allConversations.find(c => c.id === currentConversation);
-            if (!conv) {
+            if (!conv || conv.source !== 'claude') {
                 bar.classList.remove('show');
                 return;
             }
@@ -1611,13 +1743,17 @@
             let resumeId, projectDir, isBackground;
             if (conv.parent_id) {
                 label.textContent = 'Resume parent:';
-                resumeId = conv.parent_id;
-                projectDir = conv.project_dir;
                 const parentConv = allConversations.find(c => c.id === conv.parent_id);
+                if (!parentConv || parentConv.source !== 'claude') {
+                    bar.classList.remove('show');
+                    return;
+                }
+                resumeId = parentConv.source_id;
+                projectDir = parentConv.project_dir || conv.project_dir;
                 isBackground = parentConv?.is_background;
             } else {
                 label.textContent = 'To resume:';
-                resumeId = currentConversation;
+                resumeId = conv.source_id;
                 projectDir = conv.project_dir;
                 isBackground = conv.is_background;
             }
@@ -1950,20 +2086,12 @@
             const msg = allMessages[messageIndex];
             let textToCopy = '';
 
-            if (msg.message && msg.message.content) {
-                if (typeof msg.message.content === 'string') {
-                    textToCopy = msg.message.content;
-                } else if (Array.isArray(msg.message.content)) {
-                    textToCopy = msg.message.content.map(item => {
-                        if (item.type === 'text') return item.text || '';
-                        if (item.type === 'tool_use') return `Tool: ${item.name}\n${JSON.stringify(item.input, null, 2)}`;
-                        if (item.type === 'tool_result') {
-                            const rc = item.content || '';
-                            return typeof rc === 'string' ? rc : JSON.stringify(rc, null, 2);
-                        }
-                        return '';
-                    }).join('\n');
-                }
+            if (msg.kind === 'tool_use') {
+                textToCopy = `Tool: ${msg.name || 'Tool Use'}\n${stringifyPayload(msg.payload, true)}`;
+            } else if (msg.kind === 'tool_result') {
+                textToCopy = stringifyPayload(msg.payload, true);
+            } else {
+                textToCopy = msg.text || '';
             }
             
             navigator.clipboard.writeText(textToCopy).then(() => {
@@ -1984,28 +2112,35 @@
 
             allMessages.forEach(msg => {
                 const meta = classifyMessage(msg);
-                if (meta.isLocalCommand) return;
-                if (filterToolsEnabled && meta.isToolResult) return;
+                if (msg.hidden_by_default) return;
+                if (filterToolsEnabled && (meta.isToolResult || meta.isToolUse)) return;
+                if (meta.isThinking) return;
 
-                const content = msg.message?.content;
+                let heading = '';
                 let text = '';
 
-                if (typeof content === 'string') {
-                    text = content;
-                } else if (Array.isArray(content)) {
-                    content.forEach(item => {
-                        if (item.type === 'text') text += item.text + '\n\n';
-                        if (!filterToolsEnabled && item.type === 'tool_use') {
-                            text += `**Tool:** ${item.name}\n\`\`\`json\n${JSON.stringify(item.input, null, 2)}\n\`\`\`\n\n`;
-                        }
-                    });
+                if (meta.isToolUse) {
+                    heading = 'Tool Call';
+                    text = `**Tool:** ${msg.name || 'Tool Use'}\n\`\`\`json\n${stringifyPayload(msg.payload, true)}\n\`\`\``;
+                } else if (meta.isToolResult) {
+                    heading = 'Tool Output';
+                    const payloadText = stringifyPayload(msg.payload, true);
+                    text = `\`\`\`\n${payloadText}\n\`\`\``;
+                } else if (meta.isUser) {
+                    heading = 'User';
+                    text = closeOpenCodeFences((msg.text || '').trimEnd());
+                } else if (meta.isDeveloper) {
+                    heading = 'Developer';
+                    text = (msg.text || '').trimEnd();
+                } else {
+                    heading = meta.isCommentary
+                        ? `${getSourceLabel(msg.source)} Commentary`
+                        : getSourceLabel(msg.source);
+                    text = (msg.text || '').trimEnd();
                 }
 
-                text = meta.isUser ? closeOpenCodeFences(text.trimEnd()) : text.trimEnd();
                 if (!text) return;
-
-                const role = meta.isUser ? 'User' : 'Claude';
-                markdown += `## ${role}\n\n${text}\n\n---\n\n`;
+                markdown += `## ${heading}\n\n${text}\n\n---\n\n`;
             });
 
             markdown = markdown.replace(/(\n---\n\n)+$/, '\n');
@@ -2170,7 +2305,8 @@
             const container = document.getElementById('conversationsList');
             const scrollTop = container.scrollTop;
             const activeId = currentConversation;
-            await loadConversations();
+            const changed = await loadConversations();
+            if (!changed) return;
             container.scrollTop = scrollTop;
             if (activeId) {
                 document.querySelector(`[data-id="${activeId}"]`)?.classList.add('active');
@@ -2246,6 +2382,20 @@
             const search = document.getElementById('globalSearch');
             if (search) search.focus({ preventScroll: true });
         });
+
+        const conversationsPane = document.getElementById('conversationsPane');
+        const conversationsList = document.getElementById('conversationsList');
+        if (conversationsPane && conversationsList) {
+            conversationsPane.addEventListener('mouseenter', () => {
+                conversationsPane.classList.add('show-scrollbar');
+                updateSidebarScrollbar();
+            });
+            conversationsPane.addEventListener('mouseleave', () => {
+                conversationsPane.classList.remove('show-scrollbar');
+            });
+            conversationsList.addEventListener('scroll', updateSidebarScrollbar, { passive: true });
+            window.addEventListener('resize', updateSidebarScrollbar);
+        }
 
         // Load conversations on page load
         loadConversations();

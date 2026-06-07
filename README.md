@@ -1,6 +1,6 @@
 # ccpeek
 
-A sleek, fast viewer for Claude Code chat history stored locally on your machine. Browse, search, and export your AI conversations with a beautiful dark interface inspired by Claude's native design.
+A sleek, fast viewer for Claude Code and Codex CLI chat history stored locally on your machine. Browse, search, and export your AI conversations with a beautiful dark interface inspired by Claude's native design.
 
 ![ccpeek screenshot](screenshot.png)
 
@@ -9,6 +9,7 @@ A sleek, fast viewer for Claude Code chat history stored locally on your machine
 ### Core Functionality
 - **Auto-launching server** - Just type `ccpeek` and your browser opens automatically
 - **Zero configuration** - Automatically discovers all Claude Code conversations in `~/.claude/projects/`
+- **Codex support** - Also discovers local Codex CLI sessions in `~/.codex/sessions/`
 - **Lightning-fast search** - Search across all conversations and messages simultaneously
 - **Smart filtering** - Hide/show tool uses and results for cleaner reading
 - **Export to Markdown** - Download any conversation as a formatted `.md` file
@@ -41,7 +42,7 @@ A sleek, fast viewer for Claude Code chat history stored locally on your machine
 
 ### Prerequisites
 - Python 3.x installed
-- Claude Code installed with existing chat history in `~/.claude/projects/`
+- Claude Code and/or Codex CLI installed with existing local chat history
 
 ### Install Steps
 
@@ -73,7 +74,7 @@ ccpeek
 This will:
 1. Start a local server on port 8888 (or next available)
 2. Automatically open your default browser
-3. Load all your Claude Code conversations
+3. Load all your Claude Code and Codex conversations
 
 ### Viewing Conversations
 - Click any conversation in the sidebar to load it
@@ -101,7 +102,7 @@ This will:
 ### Architecture
 - **Backend**: Python HTTP server with automatic browser launching
 - **Frontend**: Vanilla JavaScript with no dependencies
-- **Storage**: Reads JSONL files from `~/.claude/projects/`
+- **Storage**: Reads JSONL files from `~/.claude/projects/` and `~/.codex/sessions/`
 - **Port Management**: Automatically finds available ports starting from 8888
 
 ### WSL2 Support
@@ -163,7 +164,7 @@ sudo ln -sf ~/ccpeek/ccpeek /usr/local/bin/ccpeek
 The server automatically finds the next available port. If you're having issues, you can manually specify a different port in `server.py`.
 
 ### No conversations showing
-Ensure you have Claude Code chat history in `~/.claude/projects/`. The tool only shows existing conversations.
+Ensure you have Claude Code history in `~/.claude/projects/` and/or Codex history in `~/.codex/sessions/`. The tool only shows existing local conversations.
 
 ## 🤝 Contributing
 
