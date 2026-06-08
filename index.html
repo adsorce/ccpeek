@@ -363,18 +363,26 @@
 
         .global-search {
             flex: 1;
-            position: relative;
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 8px;
             min-width: 0;
             max-width: 600px;
+            padding: 0 10px 0 14px;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-radius: 8px;
         }
 
         .global-search textarea {
             width: 100%;
-            padding: 10px 16px;
-            padding-right: 140px;
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-radius: 8px;
+            min-width: 0;
+            height: 40px;
+            padding: 10px 0;
+            background: transparent;
+            border: none;
+            box-sizing: border-box;
             color: #e3e3e3;
             font-size: 14px;
             font-family: inherit;
@@ -382,11 +390,10 @@
             overflow: hidden;
             min-height: 40px;
             line-height: 1.4;
-            field-sizing: content;
             max-height: 120px;
             overflow-y: auto;
             display: block;
-            margin: 5px 0;
+            margin: 0;
         }
 
         .header-title {
@@ -397,13 +404,10 @@
         }
         
         .search-controls {
-            position: absolute;
-            right: 10px;
-            top: 50%;
-            transform: translateY(-50%);
             display: flex;
             align-items: center;
             gap: 8px;
+            min-width: max-content;
         }
 
         .clear-search {
@@ -429,6 +433,9 @@
 
         .global-search textarea:focus {
             outline: none;
+        }
+
+        .global-search:focus-within {
             border-color: #4a4a4a;
             background: #0e0e0e;
         }
@@ -439,6 +446,7 @@
             gap: 8px;
             font-size: 12px;
             color: #666;
+            min-width: max-content;
         }
 
         .search-nav {
@@ -906,8 +914,11 @@
         /* ── Narrow ── */
         .show-hide-prefix { display: none; }
 
+        @media (max-width: 1024px) {
+            .search-nav { display: none; }
+        }
+
         @media (max-width: 800px) {
-            .global-search textarea { padding-right: 40px; }
             .search-info { display: none !important; }
         }
 
@@ -938,7 +949,11 @@
 
             .global-search { max-width: none; }
 
-            .global-search textarea { font-size: 16px; line-height: 1; padding: 0.7em 0.8em 0.6em; padding-right: 40px; }
+            .global-search {
+                padding: 0 8px 0 12px;
+            }
+
+            .global-search textarea { font-size: 16px; line-height: 1; padding: 0.7em 0; }
 
             /* Hide desktop-only buttons on mobile */
             #filterBtn, #exportBtn {
@@ -1155,10 +1170,18 @@
                 const date = new Date(conv.timestamp || conv.modified * 1000);
                 const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
                 const matchData = searchMatches[conv.id];
-                const hasMatches = matchData && (typeof matchData === 'object' ? matchData.count > 0 : matchData > 0);
+                const hasMatches = matchData && (
+                    typeof matchData === 'object'
+                        ? (matchData.count > 0 || matchData.titleMatch)
+                        : matchData > 0
+                );
                 const matchCount = matchData ? (typeof matchData === 'object' ? matchData.count : matchData) : 0;
                 const rawSnippet = matchData && typeof matchData === 'object' ? matchData.snippet : '';
                 const snippet = centerSnippet(rawSnippet, matchData?.tokens || searchTerm);
+                const matchLabel = !hasMatches ? '' :
+                    (matchData?.titleMatch && matchCount === 0
+                        ? 'title match'
+                        : `${matchCount} ${matchData?.wordCount === 0 ? 'partial ' : ''}match${matchCount === 1 ? '' : 'es'}`);
 
                 return `
                     <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
@@ -1171,7 +1194,7 @@
                         ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
-                            ${hasMatches ? `<span class="match-count">${matchCount} ${matchData?.wordCount === 0 ? 'partial ' : ''}match${matchCount === 1 ? '' : 'es'}</span>` : ''}
+                            ${hasMatches ? `<span class="match-count">${matchLabel}</span>` : ''}
                         </div>
                     </div>
                 `;
@@ -1790,6 +1813,7 @@
 
         function clearSearch() {
             document.getElementById('globalSearch').value = '';
+            resizeSearchBox();
             document.getElementById('clearSearch').classList.remove('show');
             performSearch('');
         }
@@ -1814,8 +1838,10 @@
                     const entry = {
                         count: visibleHits,
                         wordCount: wordCount,
+                        sortWordCount: wordCount,
                         matchScore: wordCount > 0 ? wordCount * 10 + partialCount : partialCount,
-                        snippet: match.snippet || ''
+                        snippet: match.snippet || '',
+                        titleMatch: false,
                     };
                     if (match.tokens) entry.tokens = match.tokens;
                     filteredMatches[convId] = entry;
@@ -1828,11 +1854,18 @@
                 if (conv.title.toLowerCase().includes(searchTerm)) {
                     const isWholeWord = titleWordRe.test(conv.title);
                     if (!filteredMatches[conv.id]) {
-                        filteredMatches[conv.id] = { count: 1, wordCount: isWholeWord ? 1 : 0, matchScore: isWholeWord ? 10 : 1, snippet: '' };
+                        filteredMatches[conv.id] = {
+                            count: 0,
+                            wordCount: 0,
+                            sortWordCount: isWholeWord ? 1 : 0,
+                            matchScore: isWholeWord ? 10 : 1,
+                            snippet: '',
+                            titleMatch: true,
+                        };
                     } else {
-                        filteredMatches[conv.id].count += 1;
-                        filteredMatches[conv.id].wordCount += isWholeWord ? 1 : 0;
+                        filteredMatches[conv.id].sortWordCount += isWholeWord ? 1 : 0;
                         filteredMatches[conv.id].matchScore += isWholeWord ? 10 : 1;
+                        filteredMatches[conv.id].titleMatch = true;
                     }
                 }
             });
@@ -1840,7 +1873,7 @@
             // Filter conversations to those with matches, respecting agent toggle
             const filteredConversations = filterAgentThreads(allConversations).filter(conv => {
                 const match = filteredMatches[conv.id];
-                return match && match.count > 0;
+                return match && (match.count > 0 || match.titleMatch);
             });
 
             // Phrase matches tier above all_terms, whole-word above partial, then score * recency
@@ -1851,8 +1884,8 @@
                 const isPhraseA = rawSearchMatches[a.id]?.match_type === 'all_terms' ? 0 : 1;
                 const isPhraseB = rawSearchMatches[b.id]?.match_type === 'all_terms' ? 0 : 1;
                 if (isPhraseA !== isPhraseB) return isPhraseB - isPhraseA;
-                const hasWordA = mA.wordCount > 0 ? 1 : 0;
-                const hasWordB = mB.wordCount > 0 ? 1 : 0;
+                const hasWordA = mA.sortWordCount > 0 ? 1 : 0;
+                const hasWordB = mB.sortWordCount > 0 ? 1 : 0;
                 if (hasWordA !== hasWordB) return hasWordB - hasWordA;
                 const recencyA = Math.pow(2, -((now - (a.modified || 0)) / 86400) / halfLife);
                 const recencyB = Math.pow(2, -((now - (b.modified || 0)) / 86400) / halfLife);
@@ -2254,9 +2287,17 @@
 
         // Search functionality with debounce
         const searchBox = document.getElementById('globalSearch');
+        function resizeSearchBox() {
+            searchBox.style.height = '40px';
+            if (!searchBox.value) return;
+            searchBox.style.height = Math.min(searchBox.scrollHeight, 120) + 'px';
+        }
+        resizeSearchBox();
         searchBox.addEventListener('input', (e) => {
+            resizeSearchBox();
             searchController.schedule(e.target.value);
         });
+        window.addEventListener('resize', resizeSearchBox);
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
@@ -2275,6 +2316,7 @@
                 document.activeElement.blur();
                 if (searchTerm) {
                     document.getElementById('globalSearch').value = '';
+                    resizeSearchBox();
                     searchController.cancel();
                     searchController.resetIssuedValue();
                     performSearch('');

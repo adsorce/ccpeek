@@ -660,14 +660,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             elif kind in {'message', 'commentary'}:
                 text_parts.append(
                     CCPeekHandler._strip_inline_markdown(event.get('text', '')))
-            elif kind == 'tool_use':
-                payload = event.get('payload')
-                tool_text = (event.get('name', '') + ' ' +
-                             CCPeekHandler._serialize_payload(payload)).strip()
-                text_parts.append(tool_text)
-            elif kind == 'tool_result':
-                text_parts.append(
-                    CCPeekHandler._serialize_payload(event.get('payload')))
         return text_parts, thinking_parts
 
     def handle_conversations(self, include_internal=False):
@@ -918,11 +910,19 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         for entry in entries:
             conv_id = entry['id']
             current_ids.add(conv_id)
-            mtime = entry.get('modified')
+            path = entry.get('path')
+            try:
+                stats = os.stat(path)
+                mtime = stats.st_mtime
+                size = stats.st_size
+            except OSError:
+                mtime = entry.get('modified')
+                size = entry.get('size')
 
             with _search_cache_lock:
                 cached = _search_cache.get(conv_id)
-                if cached and cached['mtime'] == mtime:
+                if (cached and cached['mtime'] == mtime
+                        and cached.get('size') == size):
                     continue
 
             events = CCPeekHandler._load_normalized_events(
@@ -938,7 +938,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'text_parts': text_parts,
                 'thinking_parts': thinking_parts,
                 'mtime': mtime,
-                'path': entry.get('path'),
+                'size': size,
+                'path': path,
                 'is_internal': entry.get('is_internal', False),
             }
             with _search_cache_lock:

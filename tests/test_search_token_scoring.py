@@ -1,9 +1,100 @@
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
-from server import CCPeekHandler
+from server import (
+    CLAUDE_SOURCE,
+    CCPeekHandler,
+    _conv_cache,
+    _conv_cache_ready,
+    _search_cache,
+)
 
 
 class SearchTokenScoringTests(unittest.TestCase):
+    def test_search_cache_uses_live_file_stats_before_conv_cache_refresh(self):
+        original_conv_cache = dict(_conv_cache)
+        original_search_cache = dict(_search_cache)
+        ready_was_set = _conv_cache_ready.is_set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "test.jsonl"
+            conv_id = "claude:test-conv"
+
+            def write_rows(rows):
+                path.write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows),
+                    encoding="utf-8",
+                )
+
+            write_rows([
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-06-08T00:00:01Z",
+                    "message": {"content": "first arrows"},
+                },
+            ])
+
+            try:
+                _conv_cache.clear()
+                _search_cache.clear()
+                _conv_cache_ready.set()
+                _conv_cache[conv_id] = {
+                    "id": conv_id,
+                    "source": CLAUDE_SOURCE,
+                    "path": str(path),
+                    "modified": 0,
+                    "size": 0,
+                    "is_internal": False,
+                }
+
+                CCPeekHandler._build_search_cache()
+                self.assertEqual(_search_cache[conv_id]["text_lower"].count("arrows"), 1)
+
+                old_mtime = path.stat().st_mtime
+                write_rows([
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-06-08T00:00:01Z",
+                        "message": {"content": "first arrows"},
+                    },
+                    {
+                        "type": "assistant",
+                        "timestamp": "2026-06-08T00:00:02Z",
+                        "message": {"content": "second arrows"},
+                    },
+                ])
+                os.utime(path, (old_mtime + 2, old_mtime + 2))
+
+                CCPeekHandler._build_search_cache()
+                self.assertEqual(_search_cache[conv_id]["text_lower"].count("arrows"), 2)
+            finally:
+                _conv_cache.clear()
+                _conv_cache.update(original_conv_cache)
+                _search_cache.clear()
+                _search_cache.update(original_search_cache)
+                if ready_was_set:
+                    _conv_cache_ready.set()
+                else:
+                    _conv_cache_ready.clear()
+
+    def test_search_parts_ignore_tool_events(self):
+        events = [
+            {"kind": "message", "text": "visible text"},
+            {"kind": "commentary", "text": "commentary text"},
+            {"kind": "tool_use", "name": "search", "payload": {"q": "arrows"}},
+            {"kind": "tool_result", "payload": "tool output"},
+            {"kind": "thinking", "text": "thinking text"},
+            {"kind": "message", "text": "hidden text", "hidden_by_default": True},
+        ]
+
+        text_parts, thinking_parts = CCPeekHandler._events_to_search_parts(events)
+
+        self.assertEqual(text_parts, ["visible text", "commentary text"])
+        self.assertEqual(thinking_parts, ["thinking text"])
+
     def test_all_terms_fallback_scores_token_presence_not_repetition(self):
         handler = object.__new__(CCPeekHandler)
         patterns = CCPeekHandler._build_token_patterns("main line of the pr")
