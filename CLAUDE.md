@@ -6,14 +6,18 @@ Claude Code chat history viewer. Single-file Python server (`server.py`) serving
 
 ccpeek runs on port 8888 via the Windows Scheduled Task "CCPeek" (or systemd user service on Linux). The task launches `pythonw.exe server.py --no-browser --port 8888` at login. Do not start a second instance; the port will already be in use.
 
-After editing server.py, restart via `--restart` (which uses schtasks under the hood):
+Always use the already-running ccpeek instance at `http://127.0.0.1:8888` for verification. Do not launch ad hoc foreground servers on alternate ports, because that leaves the main scheduled-task instance stale and makes browser validation misleading.
+
+After editing `server.py`, restart the existing service via the wrapper command:
 
 ```
-python server.py --restart
+ccpeek --restart
 ```
 
-For index.html (client-side only), a browser refresh is sufficient.
+Do not use `python server.py`, `python server.py --port ...`, or similar one-off launches for normal development verification unless the user explicitly asks for a separate instance.
+
+For `index.html` (client-side only), a browser refresh against the existing `:8888` instance is sufficient.
 
 ## Testing
 
-Test search changes against the live API at `http://127.0.0.1:8888/api/search?q=<term>`. Verify highlight and scroll-to behavior in the browser using claude-in-chrome CDP tools after loading a conversation with matches. Restart the server (see above) after any server.py edit before testing.
+Test search changes against the live API at `http://127.0.0.1:8888/api/search?q=<term>`. Verify highlight and scroll-to behavior in the browser using CDP tools after loading a conversation with matches. After any `server.py` edit, run `ccpeek --restart` and then re-test against the same `:8888` instance.

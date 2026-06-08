@@ -142,6 +142,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         and certain characters with hyphens.  The encoding is lossy,
         so we verify the result exists on disk.
         """
+        cached = CCPeekHandler._path_cache.get(encoded)
+        if cached:
+            return cached
+
         sep = os.sep
         major = encoded.split('--', 1)
         if len(major) == 2 and len(major[0]) == 1 and major[0].isalpha():
@@ -151,35 +155,56 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             prefix = sep
             rest = encoded
 
-        segments = [s for s in rest.split('-') if s]
+        def encode_part(name):
+            return re.sub(r'[^A-Za-z0-9]', '-', name)
 
-        def resolve(segs, idx, current):
-            if idx == len(segs):
-                full = prefix + current
-                if os.path.isdir(full):
-                    yield full
-                return
-            part = segs[idx]
-            for joiner in (sep, '-', '_', '.'):
-                next_path = (current + joiner + part) if current else part
-                full = prefix + next_path
-                if idx + 1 == len(segs):
-                    if os.path.isdir(full):
-                        yield full
-                elif os.path.exists(full):
-                    yield from resolve(segs, idx + 1, next_path)
-            if current:
-                next_path = current + sep + '.' + part
-                full = prefix + next_path
-                if idx + 1 == len(segs):
-                    if os.path.isdir(full):
-                        yield full
-                elif os.path.exists(full):
-                    yield from resolve(segs, idx + 1, next_path)
+        def resolve(current_dir, remainder):
+            if not remainder:
+                return (current_dir if os.path.isdir(current_dir) else None), True
+            try:
+                entries = []
+                with os.scandir(current_dir) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir():
+                                encoded_name = encode_part(entry.name)
+                                if encoded_name:
+                                    entries.append((encoded_name, entry.path))
+                        except OSError:
+                            continue
+            except OSError:
+                return os.path.join(current_dir, remainder), False
 
-        for candidate in resolve(segments, 0, ''):
-            return candidate
-        return prefix + rest.replace('-', sep)
+            # Prefer longer component matches so names like "basedin.nyc"
+            # win over partial matches like "basedin".
+            entries.sort(key=lambda item: len(item[0]), reverse=True)
+
+            best_fallback = None
+            for encoded_name, entry_path in entries:
+                if remainder == encoded_name:
+                    return entry_path, True
+                prefix_match = encoded_name + '-'
+                if remainder.startswith(prefix_match):
+                    resolved, exact = resolve(entry_path, remainder[len(prefix_match):])
+                    if exact:
+                        return resolved, True
+                    if best_fallback is None and '-' not in encoded_name:
+                        best_fallback = resolved
+
+            # If the exact path no longer exists, keep the unresolved tail as a
+            # single component instead of expanding every hyphen into a separator.
+            if best_fallback is not None:
+                return best_fallback, False
+            return os.path.join(current_dir, remainder), False
+
+        resolved, _ = resolve(prefix, rest) if rest else (prefix, True)
+        if resolved:
+            CCPeekHandler._path_cache[encoded] = resolved
+            return resolved
+
+        fallback = prefix + rest.replace('-', sep)
+        CCPeekHandler._path_cache[encoded] = fallback
+        return fallback
 
     @staticmethod
     def _make_conversation_id(source, raw_id):

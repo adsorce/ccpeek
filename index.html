@@ -1713,9 +1713,11 @@
             document.getElementById('app').classList.remove('viewing-conv');
         }
 
-        function buildResumeCmd(convId, projectDir, isBackground) {
-            let resumePart = `claude --resume ${convId}`;
-            if (isBackground) resumePart += ' --fork-session';
+        function buildResumeCmd(source, convId, projectDir, isBackground) {
+            let resumePart = source === 'codex'
+                ? `codex resume ${convId}`
+                : `claude --resume ${convId}`;
+            if (source === 'claude' && isBackground) resumePart += ' --fork-session';
             if (projectDir) {
                 const isWindows = /^[A-Z]:\\/.test(projectDir);
                 const quote = projectDir.includes(' ') ? '"' : '';
@@ -1735,19 +1737,21 @@
                 return;
             }
             const conv = allConversations.find(c => c.id === currentConversation);
-            if (!conv || conv.source !== 'claude') {
+            if (!conv || !['claude', 'codex'].includes(conv.source)) {
                 bar.classList.remove('show');
                 return;
             }
 
+            let resumeSource = conv.source;
             let resumeId, projectDir, isBackground;
-            if (conv.parent_id) {
+            if (conv.source === 'claude' && conv.parent_id) {
                 label.textContent = 'Resume parent:';
                 const parentConv = allConversations.find(c => c.id === conv.parent_id);
                 if (!parentConv || parentConv.source !== 'claude') {
                     bar.classList.remove('show');
                     return;
                 }
+                resumeSource = parentConv.source;
                 resumeId = parentConv.source_id;
                 projectDir = parentConv.project_dir || conv.project_dir;
                 isBackground = parentConv?.is_background;
@@ -1758,7 +1762,8 @@
                 isBackground = conv.is_background;
             }
 
-            document.getElementById('resumeCmdText').textContent = buildResumeCmd(resumeId, projectDir, isBackground);
+            document.getElementById('resumeCmdText').textContent = buildResumeCmd(
+                resumeSource, resumeId, projectDir, isBackground);
             bar.classList.add('show');
         }
 
