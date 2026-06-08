@@ -1068,6 +1068,7 @@
         ? - Toggle help
     </div>
 
+    <script src="/search-input-controller.js"></script>
     <script>
         let allConversations = [];
         let currentConversation = null;
@@ -1087,6 +1088,9 @@
         let searchAbort = null;
         let pendingLastMatch = false;
         let conversationListEtag = '';
+        const searchClientId = window.crypto?.randomUUID?.() ||
+            `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        let searchRequestSeq = 0;
 
         function filterAgentThreads(conversations) {
             if (showAgentThreads) return conversations;
@@ -1895,16 +1899,17 @@
             searchAbort = new AbortController();
             const signal = searchAbort.signal;
             const searchedTerm = searchTerm;
+            const requestSeq = ++searchRequestSeq;
 
             const container = document.getElementById('conversationsList');
             container.innerHTML = '<div class="empty-state"><p>Searching...</p></div>';
 
             try {
                 const response = await fetch(
-                    `/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}`,
+                    `/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}&client_id=${encodeURIComponent(searchClientId)}&request_seq=${requestSeq}`,
                     { signal });
                 const data = await response.json();
-                if (searchTerm !== searchedTerm) return;
+                if (searchTerm !== searchedTerm || requestSeq !== searchRequestSeq) return;
                 rawSearchMatches = data.matches || {};
             } catch (error) {
                 if (error.name === 'AbortError') return;
@@ -2240,13 +2245,17 @@
             }
         }
 
+        const searchController = createSearchInputController({
+            delayMs: 400,
+            onRun(value) {
+                performSearch(value);
+            },
+        });
+
         // Search functionality with debounce
         const searchBox = document.getElementById('globalSearch');
         searchBox.addEventListener('input', (e) => {
-            clearTimeout(searchDebounceTimer);
-            searchDebounceTimer = setTimeout(() => {
-                performSearch(e.target.value);
-            }, 200);
+            searchController.schedule(e.target.value);
         });
 
         // Keyboard shortcuts
@@ -2266,6 +2275,8 @@
                 document.activeElement.blur();
                 if (searchTerm) {
                     document.getElementById('globalSearch').value = '';
+                    searchController.cancel();
+                    searchController.resetIssuedValue();
                     performSearch('');
                 }
             }

@@ -37,9 +37,15 @@ _RE_META_TAGS = re.compile(
     r'<(?:' + '|'.join(re.escape(t) for t in _META_TAGS) +
     r')[^>]*>.*?</(?:' + '|'.join(re.escape(t) for t in _META_TAGS) +
     r')>\s*', re.DOTALL)
+_RE_CODEX_AGENTS_BOOTSTRAP = re.compile(
+    r'^# AGENTS\.md instructions for .+?\r?\n\r?\n<INSTRUCTIONS>\r?\n[\s\S]*?\r?\n</INSTRUCTIONS>'
+    r'(?:\s*<environment_context>[\s\S]*?</environment_context>)?\s*$'
+)
 
 _search_cache = {}
 _search_cache_lock = threading.Lock()
+_search_request_state = {}
+_search_request_state_lock = threading.Lock()
 _conv_cache = {}
 _conv_cache_lock = threading.Lock()
 _conv_cache_ready = threading.Event()
@@ -115,7 +121,13 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             query_params = parse_qs(parsed_path.query)
             search_term = query_params.get('q', [''])[0]
             include_thinking = query_params.get('include_thinking', ['false'])[0].lower() == 'true'
-            self.handle_search(unquote(search_term), include_thinking)
+            client_id = query_params.get('client_id', [''])[0]
+            request_seq = query_params.get('request_seq', [''])[0]
+            self.handle_search(
+                unquote(search_term),
+                include_thinking,
+                client_id=client_id,
+                request_seq=request_seq)
         else:
             super().do_GET()
 
@@ -250,6 +262,11 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             return text
 
     @staticmethod
+    def _is_codex_agents_bootstrap_message(text):
+        return isinstance(text, str) and bool(
+            _RE_CODEX_AGENTS_BOOTSTRAP.match(text.strip()))
+
+    @staticmethod
     def _truncate_title(text, fallback='Untitled Conversation'):
         text = (text or '').strip()
         if not text:
@@ -373,6 +390,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
     def _read_codex_metadata(session_file, session_index, index_mtime=None):
         session_meta = None
         fallback_title = None
+        first_user_message_pending = True
         try:
             with open(session_file, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
@@ -388,7 +406,16 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             continue
                         text = CCPeekHandler._extract_codex_content_text(
                             payload.get('content', []))
-                        if text and not text.lstrip().startswith('<environment_context>'):
+                        if not text:
+                            continue
+                        is_bootstrap = (
+                            first_user_message_pending and
+                            CCPeekHandler._is_codex_agents_bootstrap_message(text)
+                        )
+                        first_user_message_pending = False
+                        if is_bootstrap:
+                            continue
+                        if not text.lstrip().startswith('<environment_context>'):
                             fallback_title = text
                             break
         except IOError:
@@ -518,6 +545,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def _load_codex_events(session_path, suppress_errors=False):
         events = []
+        first_user_message_pending = True
         try:
             with open(session_path, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
@@ -537,9 +565,17 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                 payload.get('content', []))
                             if not text:
                                 continue
+                            is_bootstrap = (
+                                role == 'user' and
+                                first_user_message_pending and
+                                CCPeekHandler._is_codex_agents_bootstrap_message(text)
+                            )
+                            if role == 'user':
+                                first_user_message_pending = False
                             hidden = (
                                 role == 'developer'
                                 or text.lstrip().startswith('<environment_context>')
+                                or is_bootstrap
                             )
                             CCPeekHandler._append_event(
                                 events, CODEX_SOURCE, role, 'message', timestamp,
@@ -892,7 +928,13 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             events = CCPeekHandler._load_normalized_events(
                 entry, suppress_errors=True)
             text_parts, thinking_parts = CCPeekHandler._events_to_search_parts(events)
+            text_blob = ' '.join(text_parts)
+            thinking_blob = ' '.join(thinking_parts)
             cache_entry = {
+                'text': text_blob,
+                'thinking': thinking_blob,
+                'text_lower': text_blob.lower(),
+                'thinking_lower': thinking_blob.lower(),
                 'text_parts': text_parts,
                 'thinking_parts': thinking_parts,
                 'mtime': mtime,
@@ -921,15 +963,60 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             patterns.append((tok, p, wp))
         return patterns
 
-    def _token_search(self, text, token_patterns):
-        for _tok, p, _wp in token_patterns:
-            if not p.search(text):
-                return None
+    @staticmethod
+    def _supports_plain_search(search_term):
+        return '\n' not in search_term and '\\n' not in search_term
+
+    @staticmethod
+    def _has_plain_word_match(lower_text, lower_term):
+        start = 0
+        term_len = len(lower_term)
+        while True:
+            pos = lower_text.find(lower_term, start)
+            if pos == -1:
+                return False
+            end = pos + term_len
+            left_ok = pos == 0 or not (lower_text[pos - 1].isalnum() or lower_text[pos - 1] == '_')
+            right_ok = end == len(lower_text) or not (lower_text[end].isalnum() or lower_text[end] == '_')
+            if left_ok and right_ok:
+                return True
+            start = pos + 1
+
+    @staticmethod
+    def _normalize_search_request_seq(request_seq):
+        try:
+            return int(request_seq)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _note_search_request(client_id, request_seq):
+        request_seq = CCPeekHandler._normalize_search_request_seq(request_seq)
+        if not client_id or request_seq is None:
+            return
+        with _search_request_state_lock:
+            current = _search_request_state.get(client_id)
+            if current is None or request_seq > current:
+                _search_request_state[client_id] = request_seq
+
+    @staticmethod
+    def _is_search_request_stale(client_id, request_seq):
+        request_seq = CCPeekHandler._normalize_search_request_seq(request_seq)
+        if not client_id or request_seq is None:
+            return False
+        with _search_request_state_lock:
+            current = _search_request_state.get(client_id)
+        return current is not None and request_seq < current
+
+    def _token_search(self, text, token_patterns, lower_text=None):
+        lower_text = text.lower() if lower_text is None else lower_text
         total = 0
         word_total = 0
-        for _tok, p, wp in token_patterns:
-            total += len(p.findall(text))
-            word_total += len(wp.findall(text))
+        for _tok, _p, _wp in token_patterns:
+            if _tok.lower() not in lower_text:
+                return None
+            total += 1
+            word_total += 1
         return total, word_total
 
     def _token_snippet(self, text, token_patterns, max_len=200):
@@ -948,7 +1035,23 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             return self._create_snippet(text, rarest_match.start(), max_len)
         return ''
 
-    def handle_search(self, search_term, include_thinking=False):
+    def _token_snippet_from_parts_fast(self, parts, token_patterns, max_len=200):
+        lowered_tokens = [tok.lower() for tok, _, _ in token_patterns]
+        for part in parts:
+            part_lower = part.lower()
+            if all(tok in part_lower for tok in lowered_tokens):
+                first_pos = min(part_lower.find(tok) for tok in lowered_tokens)
+                return self._create_snippet(part, first_pos, max_len)
+        for part in parts:
+            part_lower = part.lower()
+            for tok in lowered_tokens:
+                pos = part_lower.find(tok)
+                if pos != -1:
+                    return self._create_snippet(part, pos, max_len)
+        return ''
+
+    def handle_search(self, search_term, include_thinking=False,
+                      client_id='', request_seq=''):
         """Search across all conversations for a term.
 
         Returns all matches with is_internal flag so client can filter locally.
@@ -961,39 +1064,75 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             self._json_response({'matches': {}})
             return
 
+        self._note_search_request(client_id, request_seq)
         self._build_search_cache()
+        if self._is_search_request_stale(client_id, request_seq):
+            self._json_response({'matches': {}, 'cancelled': True})
+            return
 
         pattern, word_pattern = self._build_search_pattern(search_term)
         token_patterns = self._build_token_patterns(search_term)
+        plain_search = self._supports_plain_search(search_term)
+        search_term_lower = search_term.lower() if plain_search else None
         matches = {}
 
         with _search_cache_lock:
             items = list(_search_cache.items())
 
-        for conv_id, entry in items:
-            text_blob = ' '.join(entry['text_parts'])
-            thinking_blob = ' '.join(entry['thinking_parts'])
+        for idx, (conv_id, entry) in enumerate(items):
+            if idx % 16 == 0 and self._is_search_request_stale(client_id, request_seq):
+                self._json_response({'matches': {}, 'cancelled': True})
+                return
+            text_blob = entry['text']
+            thinking_blob = entry['thinking']
+            text_lower = entry['text_lower']
+            thinking_lower = entry['thinking_lower']
 
-            text_found = pattern.findall(text_blob)
-            text_count = len(text_found)
-            text_word_count = len(word_pattern.findall(text_blob)) if text_count else 0
+            if plain_search:
+                text_count = text_lower.count(search_term_lower)
+                text_word_count = (
+                    1 if text_count and self._has_plain_word_match(
+                        text_lower, search_term_lower) else 0
+                )
+            else:
+                text_found = pattern.findall(text_blob)
+                text_count = len(text_found)
+                text_word_count = len(word_pattern.findall(text_blob)) if text_count else 0
 
             thinking_count = 0
             thinking_word_count = 0
             if include_thinking and thinking_blob:
-                thinking_found = pattern.findall(thinking_blob)
-                thinking_count = len(thinking_found)
-                thinking_word_count = (
-                    len(word_pattern.findall(thinking_blob)) if thinking_count else 0)
+                if plain_search:
+                    thinking_count = thinking_lower.count(search_term_lower)
+                    thinking_word_count = (
+                        1 if thinking_count and self._has_plain_word_match(
+                            thinking_lower, search_term_lower) else 0
+                    )
+                else:
+                    thinking_found = pattern.findall(thinking_blob)
+                    thinking_count = len(thinking_found)
+                    thinking_word_count = (
+                        len(word_pattern.findall(thinking_blob))
+                        if thinking_count else 0)
 
             if text_count or thinking_count:
                 snippet = None
                 if text_count:
-                    snippet = self._snippet_from_parts(
-                        entry['text_parts'], pattern)
+                    if plain_search:
+                        snippet = self._token_snippet_from_parts_fast(
+                            entry['text_parts'],
+                            [(search_term, pattern, word_pattern)])
+                    else:
+                        snippet = self._snippet_from_parts(
+                            entry['text_parts'], pattern)
                 if not snippet and thinking_count:
-                    snippet = self._snippet_from_parts(
-                        entry['thinking_parts'], pattern)
+                    if plain_search:
+                        snippet = self._token_snippet_from_parts_fast(
+                            entry['thinking_parts'],
+                            [(search_term, pattern, word_pattern)])
+                    else:
+                        snippet = self._snippet_from_parts(
+                            entry['thinking_parts'], pattern)
 
                 matches[conv_id] = {
                     'text_count': text_count,
@@ -1008,10 +1147,12 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             if not token_patterns:
                 continue
 
-            text_tok = self._token_search(text_blob, token_patterns)
+            text_tok = self._token_search(
+                text_blob, token_patterns, lower_text=text_lower)
             think_tok = None
             if include_thinking and thinking_blob:
-                think_tok = self._token_search(thinking_blob, token_patterns)
+                think_tok = self._token_search(
+                    thinking_blob, token_patterns, lower_text=thinking_lower)
 
             if not text_tok and not think_tok:
                 continue
@@ -1019,11 +1160,11 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             t_count, t_wcount = text_tok or (0, 0)
             th_count, th_wcount = think_tok or (0, 0)
 
-            snippet = self._token_snippet_from_parts(
+            snippet = self._token_snippet_from_parts_fast(
                 entry['text_parts'],
                 token_patterns) if text_tok else ''
             if not snippet and think_tok:
-                snippet = self._token_snippet_from_parts(
+                snippet = self._token_snippet_from_parts_fast(
                     entry['thinking_parts'], token_patterns)
 
             matches[conv_id] = {
