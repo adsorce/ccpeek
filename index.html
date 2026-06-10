@@ -1747,11 +1747,13 @@
             if (source === 'claude' && isBackground) resumePart += ' --fork-session';
             if (projectDir) {
                 const isWindows = /^[A-Z]:\\/.test(projectDir);
+                if (isWindows) {
+                    // Quote the whole line so cmd /c owns the &&, and use /d to
+                    // switch drives; cmd's cd takes unquoted paths with spaces.
+                    return `cmd /c "cd /d ${projectDir} && ${resumePart}"`;
+                }
                 const quote = projectDir.includes(' ') ? '"' : '';
-                const cdPart = `cd ${quote}${projectDir}${quote}`;
-                return isWindows
-                    ? `cmd /c ${cdPart} && ${resumePart}`
-                    : `${cdPart} && ${resumePart}`;
+                return `cd ${quote}${projectDir}${quote} && ${resumePart}`;
             }
             return resumePart;
         }
