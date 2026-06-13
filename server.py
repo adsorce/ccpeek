@@ -121,11 +121,13 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             query_params = parse_qs(parsed_path.query)
             search_term = query_params.get('q', [''])[0]
             include_thinking = query_params.get('include_thinking', ['false'])[0].lower() == 'true'
+            include_automated = query_params.get('include_automated', ['false'])[0].lower() == 'true'
             client_id = query_params.get('client_id', [''])[0]
             request_seq = query_params.get('request_seq', [''])[0]
             self.handle_search(
                 unquote(search_term),
                 include_thinking,
+                include_automated=include_automated,
                 client_id=client_id,
                 request_seq=request_seq)
         else:
@@ -306,6 +308,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             f.seek(0)
             title = "Untitled Conversation"
             model = ''
+            entrypoint = ''
             for i, line in enumerate(f):
                 if i >= 50:
                     break
@@ -313,6 +316,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     msg_data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not entrypoint and msg_data.get('type') == 'user':
+                    entrypoint = msg_data.get('entrypoint', '')
                 if not model and msg_data.get('type') == 'assistant':
                     msg = msg_data.get('message')
                     if isinstance(msg, dict) and msg.get('model'):
@@ -321,7 +326,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     found = CCPeekHandler._extract_title_from_line(msg_data)
                     if found:
                         title = found
-                if model and title != "Untitled Conversation":
+                if model and title != "Untitled Conversation" and entrypoint:
                     break
 
             rel = os.path.relpath(jsonl_file, claude_dir)
@@ -355,6 +360,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'modified': stats.st_mtime,
                 'size': stats.st_size,
                 'model': model,
+                'entrypoint': entrypoint,
             }
 
     @staticmethod
@@ -457,6 +463,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             'modified': stats.st_mtime,
             'size': stats.st_size,
             'model': model,
+            'entrypoint': 'sdk' if session_meta.get('source') == 'exec' else session_meta.get('source', ''),
             '_index_mtime': index_mtime,
         }
 
@@ -953,6 +960,9 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'size': size,
                 'path': path,
                 'is_internal': entry.get('is_internal', False),
+                'parent_id': entry.get('parent_id'),
+                'entrypoint': entry.get('entrypoint', ''),
+                'project_dir': entry.get('project_dir', ''),
             }
             with _search_cache_lock:
                 _search_cache[conv_id] = cache_entry
@@ -1063,8 +1073,23 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     return self._create_snippet(part, pos, max_len)
         return ''
 
+    _WORKTREE_RE = re.compile(r'-pr-\d+|-pr-[a-z]+-')
+
+    @staticmethod
+    def _is_automated_entry(entry):
+        if entry.get('parent_id'):
+            return True
+        ep = entry.get('entrypoint', '')
+        if isinstance(ep, dict) or ep in ('sdk-cli', 'sdk'):
+            return True
+        project_dir = entry.get('project_dir', '')
+        leaf = project_dir.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1] if project_dir else ''
+        if CCPeekHandler._WORKTREE_RE.search(leaf):
+            return True
+        return False
+
     def handle_search(self, search_term, include_thinking=False,
-                      client_id='', request_seq=''):
+                      include_automated=False, client_id='', request_seq=''):
         """Search across all conversations for a term.
 
         Returns all matches with is_internal flag so client can filter locally.
@@ -1096,6 +1121,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             if idx % 16 == 0 and self._is_search_request_stale(client_id, request_seq):
                 self._json_response({'matches': {}, 'cancelled': True})
                 return
+            if not include_automated and self._is_automated_entry(entry):
+                continue
             text_blob = entry['text']
             thinking_blob = entry['thinking']
             text_lower = entry['text_lower']

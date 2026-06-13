@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ccpeek - Claude Chat History Viewer</title>
+    <title>ccpeek - Claude/Codex History</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><style>path{fill:black}@media(prefers-color-scheme:dark){path{fill:white}}</style><path d='M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z'/></svg>">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/atom-one-dark.min.css">
@@ -85,6 +85,37 @@
             overflow: hidden;
             background: #171717;
             border-right: 1px solid #2a2a2a;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .folder-filter-bar {
+            display: none;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 4px;
+            padding: 6px 8px;
+            border-bottom: 1px solid #2a2a2a;
+            flex-shrink: 0;
+        }
+        .folder-filter-bar.show { display: flex; }
+        .folder-chip {
+            font-size: 11px;
+            color: #999;
+            background: #ffffff08;
+            border: 1px solid #ffffff15;
+            border-radius: 4px;
+            padding: 2px 7px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .folder-chip:hover { border-color: #ffffff30; color: #ccc; }
+        .folder-chip.active { background: #4a9eff22; border-color: #4a9eff55; color: #4a9eff; }
+
+        .conversations-list-wrap {
+            flex: 1;
+            min-height: 0;
+            position: relative;
         }
 
         .conversations-list {
@@ -103,9 +134,9 @@
 
         .sidebar-scrollbar {
             position: absolute;
-            top: 8px;
+            top: 0;
             right: 0;
-            bottom: 8px;
+            bottom: 0;
             width: 8px;
             opacity: 0;
             pointer-events: none;
@@ -114,6 +145,7 @@
 
         .conversations-pane.show-scrollbar .sidebar-scrollbar.visible {
             opacity: 1;
+            pointer-events: auto;
         }
 
         .sidebar-scrollbar-thumb {
@@ -206,9 +238,25 @@
             font-size: 12px;
             color: #999;
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            gap: 6px;
         }
+
+        .folder-pill {
+            font-size: 10px;
+            color: #888;
+            background: #ffffff0a;
+            border: 1px solid #ffffff12;
+            border-radius: 3px;
+            padding: 1px 5px;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 120px;
+        }
+        .folder-pill:hover { border-color: #ffffff30; color: #bbb; }
+        .folder-pill.active { background: #4a9eff22; border-color: #4a9eff55; color: #4a9eff; }
 
         .match-count {
             background: #4a9eff22;
@@ -1028,11 +1076,14 @@
 
         <!-- Row 2: list + conversation -->
         <div class="conversations-pane" id="conversationsPane">
-            <div class="conversations-list" id="conversationsList">
-                <div class="loading">Loading conversations...</div>
-            </div>
-            <div class="sidebar-scrollbar" id="sidebarScrollbar">
-                <div class="sidebar-scrollbar-thumb" id="sidebarScrollbarThumb"></div>
+            <div class="folder-filter-bar" id="folderFilterBar"></div>
+            <div class="conversations-list-wrap">
+                <div class="conversations-list" id="conversationsList">
+                    <div class="loading">Loading conversations...</div>
+                </div>
+                <div class="sidebar-scrollbar" id="sidebarScrollbar">
+                    <div class="sidebar-scrollbar-thumb" id="sidebarScrollbarThumb"></div>
+                </div>
             </div>
         </div>
 
@@ -1100,6 +1151,7 @@
         let currentMatchType = 'phrase';
         let currentTokens = [];
         let convAbort = null;
+        let folderFilter = null;
         let searchAbort = null;
         let pendingLastMatch = false;
         let conversationListEtag = '';
@@ -1107,9 +1159,47 @@
             `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         let searchRequestSeq = 0;
 
+        const WORKTREE_RE = /-pr-\d+|-pr-[a-z]+-/;
+        function isAutomatedConv(c) {
+            if (c.parent_id) return true;
+            if (WORKTREE_RE.test(folderName(c.project_dir))) return true;
+            const ep = c.entrypoint;
+            if (typeof ep === 'object') return true;
+            if (ep === 'sdk-cli' || ep === 'sdk') return true;
+            return false;
+        }
+
         function filterAgentThreads(conversations) {
-            if (showAgentThreads) return conversations;
-            return conversations.filter(c => !c.parent_id);
+            let filtered = showAgentThreads
+                ? conversations
+                : conversations.filter(c => !isAutomatedConv(c));
+            if (folderFilter) filtered = filtered.filter(c => folderName(c.project_dir) === folderFilter);
+            return filtered;
+        }
+
+        function applyFilters() {
+            updateFolderFilterBar();
+            renderConversations(filterAgentThreads(allConversations));
+        }
+
+        function updateFolderFilterBar() {
+            const bar = document.getElementById('folderFilterBar');
+            const counts = {};
+            const base = showAgentThreads
+                ? allConversations
+                : allConversations.filter(c => !isAutomatedConv(c));
+            base.forEach(c => {
+                const f = folderName(c.project_dir);
+                if (f) counts[f] = (counts[f] || 0) + 1;
+            });
+            const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).filter(([, n]) => n >= 10).slice(0, 12);
+            if (sorted.length <= 1) { bar.classList.remove('show'); return; }
+            if (folderFilter && !sorted.find(([n]) => n === folderFilter))
+                sorted.push([folderFilter, counts[folderFilter] || 0]);
+            bar.innerHTML = sorted.map(([name, count]) =>
+                `<span class="folder-chip${folderFilter === name ? ' active' : ''}" onclick="toggleFolderFilter('${name.replace(/'/g, "\\'")}', event)" title="${count} conversations">${escapeHtml(name)}</span>`
+            ).join('');
+            bar.classList.add('show');
         }
 
         function getSourceLabel(source) {
@@ -1145,6 +1235,7 @@
                 conversationListEtag = response.headers.get('ETag') || '';
                 allConversations = nextConversations;
                 if (changed) {
+                    updateFolderFilterBar();
                     renderConversations(filterAgentThreads(allConversations));
                 }
                 return changed;
@@ -1167,8 +1258,7 @@
             }
 
             container.innerHTML = conversations.map(conv => {
-                const date = new Date(conv.timestamp || conv.modified * 1000);
-                const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+                const dateStr = formatRelativeTime(conv.modified * 1000);
                 const matchData = searchMatches[conv.id];
                 const hasMatches = matchData && (
                     typeof matchData === 'object'
@@ -1194,7 +1284,8 @@
                         ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
                             <span>${dateStr}</span>
-                            ${hasMatches ? `<span class="match-count">${matchLabel}</span>` : ''}
+                            ${(() => { const f = folderName(conv.project_dir); return f ? `<span class="folder-pill${folderFilter === f ? ' active' : ''}" onclick="toggleFolderFilter('${f.replace(/'/g, "\\'")}', event)" title="${escapeHtml(conv.project_dir)}">${escapeHtml(f)}</span>` : ''; })()}
+                            ${hasMatches ? `<span class="match-count" style="margin-left:auto">${matchLabel}</span>` : ''}
                         </div>
                     </div>
                 `;
@@ -1634,6 +1725,30 @@
             return open % 2 !== 0 ? text + '\n```' : text;
         }
 
+        function folderName(projectDir) {
+            if (!projectDir) return '';
+            const leaf = projectDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+            return leaf || '';
+        }
+
+        function toggleFolderFilter(name, event) {
+            event.stopPropagation();
+            folderFilter = folderFilter === name ? null : name;
+            applyFilters();
+        }
+
+        function formatRelativeTime(ms) {
+            const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+            if (sec < 60) return 'just now';
+            const min = Math.floor(sec / 60);
+            if (min < 60) return `${min}m ago`;
+            const hr = Math.floor(min / 60);
+            if (hr < 24) return `${hr}h ago`;
+            const d = Math.floor(hr / 24);
+            const remH = hr % 24;
+            return remH ? `${d}d ${remH}h ago` : `${d}d ago`;
+        }
+
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -1944,7 +2059,7 @@
 
             try {
                 const response = await fetch(
-                    `/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}&client_id=${encodeURIComponent(searchClientId)}&request_seq=${requestSeq}`,
+                    `/api/search?q=${encodeURIComponent(term)}&include_thinking=${includeThinking}&include_automated=${showAgentThreads}&client_id=${encodeURIComponent(searchClientId)}&request_seq=${requestSeq}`,
                     { signal });
                 const data = await response.json();
                 if (searchTerm !== searchedTerm || requestSeq !== searchRequestSeq) return;
@@ -2458,6 +2573,32 @@
             });
             conversationsList.addEventListener('scroll', updateSidebarScrollbar, { passive: true });
             window.addEventListener('resize', updateSidebarScrollbar);
+
+            const sbThumb = document.getElementById('sidebarScrollbarThumb');
+            const sbTrack = document.getElementById('sidebarScrollbar');
+            if (sbThumb && sbTrack) {
+                let dragging = false, startY = 0, startScroll = 0;
+                sbThumb.addEventListener('mousedown', e => {
+                    e.preventDefault();
+                    dragging = true;
+                    startY = e.clientY;
+                    startScroll = conversationsList.scrollTop;
+                    document.body.style.userSelect = 'none';
+                });
+                window.addEventListener('mousemove', e => {
+                    if (!dragging) return;
+                    const trackH = sbTrack.clientHeight;
+                    const thumbH = sbThumb.offsetHeight;
+                    const scrollable = conversationsList.scrollHeight - conversationsList.clientHeight;
+                    const ratio = scrollable / (trackH - thumbH);
+                    conversationsList.scrollTop = startScroll + (e.clientY - startY) * ratio;
+                });
+                window.addEventListener('mouseup', () => {
+                    if (!dragging) return;
+                    dragging = false;
+                    document.body.style.userSelect = '';
+                });
+            }
         }
 
         // Load conversations on page load
