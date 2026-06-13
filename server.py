@@ -305,6 +305,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
             f.seek(0)
             title = "Untitled Conversation"
+            model = ''
             for i, line in enumerate(f):
                 if i >= 50:
                     break
@@ -312,9 +313,15 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     msg_data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                found = CCPeekHandler._extract_title_from_line(msg_data)
-                if found:
-                    title = found
+                if not model and msg_data.get('type') == 'assistant':
+                    msg = msg_data.get('message')
+                    if isinstance(msg, dict) and msg.get('model'):
+                        model = msg['model']
+                if not title or title == "Untitled Conversation":
+                    found = CCPeekHandler._extract_title_from_line(msg_data)
+                    if found:
+                        title = found
+                if model and title != "Untitled Conversation":
                     break
 
             rel = os.path.relpath(jsonl_file, claude_dir)
@@ -347,6 +354,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'timestamp': data.get('timestamp', ''),
                 'modified': stats.st_mtime,
                 'size': stats.st_size,
+                'model': model,
             }
 
     @staticmethod
@@ -390,6 +398,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
     def _read_codex_metadata(session_file, session_index, index_mtime=None):
         session_meta = None
         fallback_title = None
+        model = ''
         first_user_message_pending = True
         try:
             with open(session_file, 'r', encoding='utf-8', errors='replace') as f:
@@ -400,6 +409,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         continue
                     if data.get('type') == 'session_meta' and not session_meta:
                         session_meta = data.get('payload') or {}
+                    elif data.get('type') == 'turn_context' and not model:
+                        model = (data.get('payload') or {}).get('model', '')
                     elif data.get('type') == 'response_item':
                         payload = data.get('payload') or {}
                         if payload.get('type') != 'message' or payload.get('role') != 'user':
@@ -445,6 +456,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             'timestamp': session_meta.get('timestamp', ''),
             'modified': stats.st_mtime,
             'size': stats.st_size,
+            'model': model,
             '_index_mtime': index_mtime,
         }
 
