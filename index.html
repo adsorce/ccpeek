@@ -1675,7 +1675,7 @@
             const meta = classifyMessage(msg);
 
             const isTool = meta.isToolResult || meta.isToolUse;
-            const content = (isTool && filterToolsEnabled) ? '' : formatContent(msg, meta, highlightTerm);
+            const content = formatContent(msg, meta, highlightTerm);
             const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
 
             let avatar, avatarStyle, roleLabel, cssClass;
