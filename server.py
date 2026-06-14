@@ -37,6 +37,10 @@ _RE_META_TAGS = re.compile(
     r'<(?:' + '|'.join(re.escape(t) for t in _META_TAGS) +
     r')[^>]*>.*?</(?:' + '|'.join(re.escape(t) for t in _META_TAGS) +
     r')>\s*', re.DOTALL)
+_RE_COMMAND_NAME = re.compile(r'<command-name>(.*?)</command-name>')
+_RE_COMMAND_ARGS = re.compile(r'<command-args>(.*?)</command-args>')
+_RE_SKILL_INJECTION = re.compile(r'^Base directory for this skill:')
+_RE_CODEX_SKILL_INJECTION = re.compile(r'^\s*<skill>\s*\n\s*<name>')
 _RE_CODEX_AGENTS_BOOTSTRAP = re.compile(
     r'^# AGENTS\.md instructions for .+?\r?\n\r?\n<INSTRUCTIONS>\r?\n[\s\S]*?\r?\n</INSTRUCTIONS>'
     r'(?:\s*<environment_context>[\s\S]*?</environment_context>)?\s*$'
@@ -142,9 +146,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if data.get('type') == 'user' and data.get('message'):
             raw = extract_first_text(data['message'].get('content', ''), max_len=0)
             if raw:
-                stripped = _RE_META_TAGS.sub('', raw).strip()
-                if stripped:
-                    return stripped[:200] + ('...' if len(stripped) > 200 else '')
+                collapsed, hidden = CCPeekHandler._collapse_user_text(raw)
+                if hidden:
+                    return None
+                return collapsed[:200] + ('...' if len(collapsed) > 200 else '')
         return None
 
     @staticmethod
@@ -484,13 +489,39 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _flush_text_buffer(events, source, role, timestamp, text_parts,
-                           hidden_by_default=False):
+                           hidden_by_default=False, collapse_user=False):
         text = '\n\n'.join(part for part in text_parts if part).strip()
         text_parts.clear()
         if text:
+            if collapse_user:
+                text, hidden = CCPeekHandler._collapse_user_text(text)
+                hidden_by_default = hidden_by_default or hidden
             CCPeekHandler._append_event(
                 events, source, role, 'message', timestamp, text=text,
                 hidden_by_default=hidden_by_default)
+
+    @staticmethod
+    def _collapse_user_text(text):
+        """Collapse skill injections, command tags, and meta-tag-only
+        user messages into a compact readable form.
+
+        Returns (collapsed_text, hidden) where hidden=True means the
+        message should be hidden by default (e.g. skill body content
+        that follows the command invocation in a separate message).
+        """
+        if _RE_SKILL_INJECTION.match(text):
+            return text, True
+        stripped = _RE_META_TAGS.sub('', text).strip()
+        if stripped:
+            return stripped, False
+        name_m = _RE_COMMAND_NAME.search(text)
+        if name_m:
+            title = name_m.group(1)
+            args_m = _RE_COMMAND_ARGS.search(text)
+            if args_m and args_m.group(1):
+                title += ' ' + args_m.group(1)
+            return title, False
+        return text, True
 
     @staticmethod
     def _load_claude_events(jsonl_path, suppress_errors=False):
@@ -509,11 +540,15 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         continue
 
                     if isinstance(content, str):
-                        if role == 'user' and CCPeekHandler._is_local_command_text(content):
-                            continue
-                        CCPeekHandler._append_event(
-                            events, CLAUDE_SOURCE, role, 'message', timestamp,
-                            text=content)
+                        if role == 'user':
+                            content, hidden = CCPeekHandler._collapse_user_text(content)
+                            CCPeekHandler._append_event(
+                                events, CLAUDE_SOURCE, role, 'message', timestamp,
+                                text=content, hidden_by_default=hidden)
+                        else:
+                            CCPeekHandler._append_event(
+                                events, CLAUDE_SOURCE, role, 'message', timestamp,
+                                text=content)
                         continue
 
                     if isinstance(content, dict):
@@ -523,9 +558,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         continue
 
                     text_parts = []
+                    is_user = role == 'user'
                     for item in content:
                         if isinstance(item, str):
-                            if role == 'user' and CCPeekHandler._is_local_command_text(item):
+                            if is_user and CCPeekHandler._is_local_command_text(item):
                                 continue
                             text_parts.append(item)
                             continue
@@ -536,25 +572,29 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             text_parts.append(str(item.get('text', '')))
                         elif item_type == 'thinking':
                             CCPeekHandler._flush_text_buffer(
-                                events, CLAUDE_SOURCE, role, timestamp, text_parts)
+                                events, CLAUDE_SOURCE, role, timestamp, text_parts,
+                                collapse_user=is_user)
                             CCPeekHandler._append_event(
                                 events, CLAUDE_SOURCE, 'assistant', 'thinking',
                                 timestamp, text=str(item.get('thinking', '')))
                         elif item_type == 'tool_use':
                             CCPeekHandler._flush_text_buffer(
-                                events, CLAUDE_SOURCE, role, timestamp, text_parts)
+                                events, CLAUDE_SOURCE, role, timestamp, text_parts,
+                                collapse_user=is_user)
                             CCPeekHandler._append_event(
                                 events, CLAUDE_SOURCE, role, 'tool_use', timestamp,
                                 name=item.get('name', 'Tool Use'),
                                 payload=item.get('input', {}))
                         elif item_type == 'tool_result':
                             CCPeekHandler._flush_text_buffer(
-                                events, CLAUDE_SOURCE, role, timestamp, text_parts)
+                                events, CLAUDE_SOURCE, role, timestamp, text_parts,
+                                collapse_user=is_user)
                             CCPeekHandler._append_event(
                                 events, CLAUDE_SOURCE, role, 'tool_result', timestamp,
                                 payload=item.get('content', ''))
                     CCPeekHandler._flush_text_buffer(
-                        events, CLAUDE_SOURCE, role, timestamp, text_parts)
+                        events, CLAUDE_SOURCE, role, timestamp, text_parts,
+                        collapse_user=is_user)
         except IOError:
             if suppress_errors:
                 return []
@@ -595,6 +635,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                                 role == 'developer'
                                 or text.lstrip().startswith('<environment_context>')
                                 or is_bootstrap
+                                or (role == 'user' and bool(_RE_CODEX_SKILL_INJECTION.match(text)))
                             )
                             CCPeekHandler._append_event(
                                 events, CODEX_SOURCE, role, 'message', timestamp,
@@ -1755,6 +1796,11 @@ def main(argv=None):
             _conv_cache_ready.set()
             time.sleep(CACHE_REFRESH_INTERVAL)
     threading.Thread(target=_refresh_conv_cache, daemon=True).start()
+
+    def _warmup_search_cache():
+        _conv_cache_ready.wait()
+        CCPeekHandler._build_search_cache()
+    threading.Thread(target=_warmup_search_cache, daemon=True).start()
 
     if args.open_browser and host in LOCAL_HOSTS:
         threading.Thread(target=open_browser, args=(host if host != 'localhost' else '127.0.0.1', port), daemon=True).start()
