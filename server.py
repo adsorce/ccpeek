@@ -10,6 +10,7 @@ import subprocess
 import shutil
 import re
 import hashlib
+import sqlite3 as _sqlite3
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse, unquote
@@ -25,6 +26,7 @@ UNIT_PATH = os.path.expanduser('~/.config/systemd/user/ccpeek.service')
 TASK_NAME = 'CCPeek'
 CLAUDE_SOURCE = 'claude'
 CODEX_SOURCE = 'codex'
+OPENCODE_SOURCE = 'opencode'
 CACHE_REFRESH_INTERVAL = 30
 
 _RE_MD_FENCED = re.compile(r'```[^\n]*\n(.*?)```', re.DOTALL)
@@ -41,6 +43,11 @@ _RE_COMMAND_NAME = re.compile(r'<command-name>(.*?)</command-name>')
 _RE_COMMAND_ARGS = re.compile(r'<command-args>(.*?)</command-args>')
 _RE_SKILL_INJECTION = re.compile(r'^Base directory for this skill:')
 _RE_CODEX_SKILL_INJECTION = re.compile(r'^\s*<skill>\s*\n\s*<name>')
+_RE_OPENCODE_SKILL_CONTENT = re.compile(r'^\s*<skill_content\s+name=')
+_RE_OPENCODE_CMD_TEMPLATE = re.compile(
+    r'^Use the `([^`]+)` skill from .+?\.\s*\n\s*'
+    r'Treat everything after `/[^`]+` as the skill arguments:\s*\n`([^`]*)`\s*\n',
+    re.DOTALL)
 _RE_CODEX_AGENTS_BOOTSTRAP = re.compile(
     r'^# AGENTS\.md instructions for .+?\r?\n\r?\n<INSTRUCTIONS>\r?\n[\s\S]*?\r?\n</INSTRUCTIONS>'
     r'(?:\s*<environment_context>[\s\S]*?</environment_context>)?\s*$'
@@ -234,7 +241,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if ':' not in conversation_id:
             return None, None
         source, raw_id = conversation_id.split(':', 1)
-        if source not in {CLAUDE_SOURCE, CODEX_SOURCE} or not raw_id:
+        if source not in {CLAUDE_SOURCE, CODEX_SOURCE, OPENCODE_SOURCE} or not raw_id:
             return None, None
         return source, raw_id
 
@@ -472,6 +479,127 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             '_index_mtime': index_mtime,
         }
 
+    _OPENCODE_VARIANTS = [
+        ('mimocode', 'mimocode.db', 'MiMoCode', 'mimo'),
+        ('opencode', 'opencode.db', 'OpenCode', 'opencode'),
+    ]
+
+    @staticmethod
+    def _opencode_db_paths():
+        if sys.platform == 'win32':
+            data_home = os.path.join(os.path.expanduser('~'), '.local', 'share')
+        else:
+            data_home = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+        found = []
+        for dir_name, db_name, label, cli in CCPeekHandler._OPENCODE_VARIANTS:
+            db_path = os.path.join(data_home, dir_name, db_name)
+            if os.path.exists(db_path):
+                found.append((db_path, label, cli))
+        return found
+
+    @staticmethod
+    def _read_opencode_sessions():
+        results = []
+        for db_path, variant_label, variant_cli in CCPeekHandler._opencode_db_paths():
+            CCPeekHandler._read_opencode_db(
+                db_path, variant_label, variant_cli, results)
+        return results
+
+    @staticmethod
+    def _read_opencode_db(db_path, variant_label, variant_cli, results):
+        try:
+            db_mtime = os.stat(db_path).st_mtime
+            conn = _sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            conn.row_factory = _sqlite3.Row
+            c = conn.cursor()
+            c.execute("""
+                SELECT s.id, s.title, s.directory, s.parent_id,
+                       s.time_created, s.time_updated
+                FROM session s
+                WHERE s.id NOT IN (SELECT session_id FROM claude_import)
+                ORDER BY s.time_updated DESC
+            """)
+            sessions = c.fetchall()
+            for row in sessions:
+                sid = row['id']
+                c2 = conn.cursor()
+                c2.execute("""
+                    SELECT data FROM message
+                    WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'
+                    ORDER BY time_created ASC LIMIT 1
+                """, (sid,))
+                model_row = c2.fetchone()
+                model = ''
+                if model_row:
+                    try:
+                        mdata = json.loads(model_row['data'])
+                        m = mdata.get('model')
+                        model_id = m.get('modelID', '') if isinstance(m, dict) else mdata.get('modelID', '')
+                        provider_id = mdata.get('providerID', '')
+                        model = f'{provider_id}/{model_id}' if provider_id and model_id else model_id
+                    except (json.JSONDecodeError, TypeError, AttributeError):
+                        pass
+
+                title = row['title'] or ''
+                c3 = conn.cursor()
+                c3.execute("""
+                    SELECT p.data FROM part p
+                    JOIN message m ON m.id = p.message_id
+                    WHERE m.session_id = ?
+                      AND json_extract(m.data, '$.role') = 'user'
+                      AND json_extract(p.data, '$.type') = 'text'
+                    ORDER BY m.time_created ASC, p.time_created ASC LIMIT 1
+                """, (sid,))
+                title_row = c3.fetchone()
+                if title_row:
+                    try:
+                        first_text = json.loads(title_row['data']).get('text', '')
+                        collapsed, _ = CCPeekHandler._collapse_user_text(first_text)
+                        if len(collapsed) < len(title) or not title or title == 'New Session':
+                            title = collapsed[:200]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if not title or title == 'New Session':
+                    title = 'Untitled Conversation'
+
+                title = CCPeekHandler._truncate_title(title)
+                time_created = row['time_created'] or 0
+                time_updated = row['time_updated'] or 0
+                ts_iso = ''
+                if time_created:
+                    try:
+                        from datetime import datetime, timezone
+                        ts_iso = datetime.fromtimestamp(
+                            time_created / 1000, tz=timezone.utc).isoformat()
+                    except (OSError, ValueError, OverflowError):
+                        pass
+
+                conv_id = CCPeekHandler._make_conversation_id(OPENCODE_SOURCE, sid)
+                results.append({
+                    'id': conv_id,
+                    'source': OPENCODE_SOURCE,
+                    'source_id': sid,
+                    'path': db_path,
+                    'project_dir': row['directory'] or '',
+                    'parent_id': (
+                        CCPeekHandler._make_conversation_id(OPENCODE_SOURCE, row['parent_id'])
+                        if row['parent_id'] else None),
+                    'title': title,
+                    'is_internal': False,
+                    'timestamp': ts_iso,
+                    'modified': (time_updated or time_created) / 1000,
+                    'size': 0,
+                    'model': model,
+                    'entrypoint': '',
+                    'variant_label': variant_label,
+                    'variant_cli': variant_cli,
+                    '_opencode_db_mtime': db_mtime,
+                })
+            conn.close()
+        except Exception:
+            pass
+        return results
+
     @staticmethod
     def _append_event(events, source, role, kind, timestamp, text='',
                       name='', payload=None, hidden_by_default=False):
@@ -511,6 +639,16 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         """
         if _RE_SKILL_INJECTION.match(text):
             return text, True
+        if _RE_OPENCODE_SKILL_CONTENT.match(text):
+            return text, True
+        cmd_m = _RE_OPENCODE_CMD_TEMPLATE.match(text)
+        if cmd_m:
+            skill_name = cmd_m.group(1)
+            skill_args = cmd_m.group(2).strip()
+            title = '/' + skill_name
+            if skill_args:
+                title += ' ' + skill_args
+            return title, False
         stripped = _RE_META_TAGS.sub('', text).strip()
         if stripped:
             return stripped, False
@@ -665,6 +803,94 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return events
 
     @staticmethod
+    def _load_opencode_events(entry, suppress_errors=False):
+        events = []
+        db_path = entry.get('path', '')
+        session_id = entry.get('source_id', '')
+        if not db_path or not session_id:
+            return events
+        try:
+            conn = _sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+            conn.row_factory = _sqlite3.Row
+            c = conn.cursor()
+            c.execute("""
+                SELECT m.id, m.time_created, m.data AS msg_data
+                FROM message m
+                WHERE m.session_id = ?
+                ORDER BY m.time_created ASC
+            """, (session_id,))
+            messages = c.fetchall()
+            for msg in messages:
+                msg_data = json.loads(msg['msg_data']) if msg['msg_data'] else {}
+                role = msg_data.get('role', 'assistant')
+                ts_ms = msg['time_created']
+                timestamp = ''
+                if ts_ms:
+                    try:
+                        from datetime import datetime, timezone
+                        timestamp = datetime.fromtimestamp(
+                            ts_ms / 1000, tz=timezone.utc).isoformat()
+                    except (OSError, ValueError, OverflowError):
+                        pass
+
+                c2 = conn.cursor()
+                c2.execute("""
+                    SELECT data FROM part
+                    WHERE message_id = ?
+                    ORDER BY time_created ASC
+                """, (msg['id'],))
+                parts = c2.fetchall()
+                text_parts = []
+                for part_row in parts:
+                    pd = json.loads(part_row['data']) if part_row['data'] else {}
+                    ptype = pd.get('type', '')
+                    if ptype == 'text':
+                        text = pd.get('text', '')
+                        if role == 'user':
+                            text, hidden = CCPeekHandler._collapse_user_text(text)
+                            if text:
+                                text_parts.append((text, hidden))
+                        elif text:
+                            text_parts.append((text, False))
+                    elif ptype == 'reasoning':
+                        for t, h in text_parts:
+                            CCPeekHandler._append_event(
+                                events, OPENCODE_SOURCE, role, 'message',
+                                timestamp, text=t, hidden_by_default=h)
+                        text_parts.clear()
+                        thinking = pd.get('text', '')
+                        if thinking:
+                            CCPeekHandler._append_event(
+                                events, OPENCODE_SOURCE, 'assistant',
+                                'thinking', timestamp, text=thinking)
+                    elif ptype == 'tool':
+                        for t, h in text_parts:
+                            CCPeekHandler._append_event(
+                                events, OPENCODE_SOURCE, role, 'message',
+                                timestamp, text=t, hidden_by_default=h)
+                        text_parts.clear()
+                        state = pd.get('state', {})
+                        tool_name = pd.get('tool', 'Tool')
+                        tool_input = state.get('input', {})
+                        CCPeekHandler._append_event(
+                            events, OPENCODE_SOURCE, 'assistant', 'tool_use',
+                            timestamp, name=tool_name, payload=tool_input)
+                        if state.get('status') == 'completed':
+                            CCPeekHandler._append_event(
+                                events, OPENCODE_SOURCE, 'assistant',
+                                'tool_result', timestamp,
+                                payload=state.get('output', ''))
+                for t, h in text_parts:
+                    CCPeekHandler._append_event(
+                        events, OPENCODE_SOURCE, role, 'message',
+                        timestamp, text=t, hidden_by_default=h)
+            conn.close()
+        except Exception:
+            if not suppress_errors:
+                raise
+        return events
+
+    @staticmethod
     def _load_normalized_events(entry, suppress_errors=False):
         source = entry.get('source')
         path = entry.get('path')
@@ -674,6 +900,9 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if source == CODEX_SOURCE:
             return CCPeekHandler._load_codex_events(
                 path, suppress_errors=suppress_errors)
+        if source == OPENCODE_SOURCE:
+            return CCPeekHandler._load_opencode_events(
+                entry, suppress_errors=suppress_errors)
         return []
 
     @staticmethod
@@ -704,6 +933,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         session_file, session_index)
                     if entry and entry.get('source_id') == raw_id:
                         return entry
+        elif source == OPENCODE_SOURCE:
+            for entry in CCPeekHandler._read_opencode_sessions():
+                if entry.get('source_id') == raw_id:
+                    return entry
         return None
 
     @staticmethod
@@ -1789,6 +2022,24 @@ def main(argv=None):
                             next_cache[entry['id']] = entry
                     except Exception:
                         pass
+
+            opencode_dbs = CCPeekHandler._opencode_db_paths()
+            if opencode_dbs:
+                try:
+                    db_mtimes = {p: os.stat(p).st_mtime for p, _, _ in opencode_dbs}
+                    cached_opencode = {
+                        eid: e for eid, e in existing_cache.items()
+                        if e.get('source') == OPENCODE_SOURCE
+                    }
+                    if (cached_opencode and all(
+                            e.get('_opencode_db_mtime') == db_mtimes.get(e.get('path'))
+                            for e in cached_opencode.values())):
+                        next_cache.update(cached_opencode)
+                    else:
+                        for entry in CCPeekHandler._read_opencode_sessions():
+                            next_cache[entry['id']] = entry
+                except Exception:
+                    pass
 
             with _conv_cache_lock:
                 _conv_cache.clear()

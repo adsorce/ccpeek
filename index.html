@@ -234,6 +234,16 @@
             border-color: #294865;
         }
 
+        .source-badge.opencode {
+            background: #1a2d1a;
+            color: #8ae6a0;
+            border-color: #335c33;
+        }
+
+        .source-badge { cursor: pointer; }
+        .source-badge:hover { filter: brightness(1.3); }
+        .source-badge.active { box-shadow: 0 0 0 1px currentColor; }
+
         .conversation-meta {
             font-size: 12px;
             color: #999;
@@ -1152,6 +1162,7 @@
         let currentTokens = [];
         let convAbort = null;
         let folderFilter = null;
+        let sourceFilter = null;
         let searchAbort = null;
         let pendingLastMatch = false;
         let conversationListEtag = '';
@@ -1174,12 +1185,17 @@
                 ? conversations
                 : conversations.filter(c => !isAutomatedConv(c));
             if (folderFilter) filtered = filtered.filter(c => folderName(c.project_dir) === folderFilter);
+            if (sourceFilter) filtered = filtered.filter(c => c.source === sourceFilter);
             return filtered;
         }
 
         function applyFilters() {
             updateFolderFilterBar();
-            renderConversations(filterAgentThreads(allConversations));
+            if (searchTerm) {
+                applySearchFilters();
+            } else {
+                renderConversations(filterAgentThreads(allConversations));
+            }
         }
 
         function updateFolderFilterBar() {
@@ -1202,13 +1218,25 @@
             bar.classList.add('show');
         }
 
-        function getSourceLabel(source) {
-            return source === 'codex' ? 'Codex' : 'Claude';
+        function getSourceLabel(source, conv) {
+            if (source === 'codex') return 'Codex';
+            if (source === 'opencode') {
+                const c = conv || allConversations.find(c => c.id === currentConversation);
+                return (c && c.variant_label) || 'OpenCode';
+            }
+            return 'Claude';
         }
 
-        function renderSourceBadge(source) {
-            const cls = source === 'codex' ? 'codex' : 'claude';
-            return `<span class="source-badge ${cls}">${escapeHtml(getSourceLabel(source))}</span>`;
+        function renderSourceBadge(source, conv) {
+            const cls = source === 'codex' ? 'codex' : source === 'opencode' ? 'opencode' : 'claude';
+            const active = sourceFilter === source ? ' active' : '';
+            return `<span class="source-badge ${cls}${active}" onclick="toggleSourceFilter('${source}', event)">${escapeHtml(getSourceLabel(source, conv))}</span>`;
+        }
+
+        function toggleSourceFilter(source, event) {
+            event.stopPropagation();
+            sourceFilter = sourceFilter === source ? null : source;
+            applyFilters();
         }
 
         function updateHeaderTitle(conv) {
@@ -1217,7 +1245,7 @@
                 title.textContent = '';
                 return;
             }
-            title.innerHTML = `${escapeHtml(conv.title)} ${renderSourceBadge(conv.source)}`;
+            title.innerHTML = `${escapeHtml(conv.title)} ${renderSourceBadge(conv.source, conv)}`;
         }
 
         // Load conversations on startup
@@ -1279,7 +1307,7 @@
                          onclick="loadConversation('${conv.id}')">
                         <div class="conversation-title-row">
                             <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
-                            ${renderSourceBadge(conv.source)}
+                            ${renderSourceBadge(conv.source, conv)}
                         </div>
                         ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                         <div class="conversation-meta">
@@ -1692,7 +1720,7 @@
                 avatar = 'D'; avatarStyle = '';
                 roleLabel = 'Developer'; cssClass = 'assistant';
             } else {
-                avatar = msg.source === 'codex' ? 'O' : 'C'; avatarStyle = '';
+                avatar = msg.source === 'codex' ? 'O' : msg.source === 'opencode' ? 'M' : 'C'; avatarStyle = '';
                 roleLabel = meta.isCommentary
                     ? `${getSourceLabel(msg.source)} Commentary`
                     : getSourceLabel(msg.source);
@@ -1855,11 +1883,15 @@
             document.getElementById('app').classList.remove('viewing-conv');
         }
 
-        function buildResumeCmd(source, convId, projectDir, isBackground, model) {
-            let resumePart = source === 'codex'
-                ? `codex resume ${convId}`
-                : `claude --resume ${convId}`;
-            if (model) resumePart += source === 'codex' ? ` -m ${model}` : ` --model ${model}`;
+        function buildResumeCmd(source, convId, projectDir, isBackground, model, conv) {
+            let resumePart;
+            if (source === 'codex') resumePart = `codex resume ${convId}`;
+            else if (source === 'opencode') resumePart = `${(conv && conv.variant_cli) || 'opencode'} -s ${convId}`;
+            else resumePart = `claude --resume ${convId}`;
+            if (model) {
+                if (source === 'claude') resumePart += ` --model ${model}`;
+                else resumePart += ` -m ${model}`;
+            }
             if (source === 'claude' && isBackground) resumePart += ' --fork-session';
             if (projectDir) {
                 const isWindows = /^[A-Z]:\\/.test(projectDir);
@@ -1882,17 +1914,17 @@
                 return;
             }
             const conv = allConversations.find(c => c.id === currentConversation);
-            if (!conv || !['claude', 'codex'].includes(conv.source)) {
+            if (!conv || !['claude', 'codex', 'opencode'].includes(conv.source)) {
                 bar.classList.remove('show');
                 return;
             }
 
             let resumeSource = conv.source;
             let resumeId, projectDir, isBackground, model;
-            if (conv.source === 'claude' && conv.parent_id) {
+            if ((conv.source === 'claude' || conv.source === 'opencode') && conv.parent_id) {
                 label.textContent = 'Resume parent:';
                 const parentConv = allConversations.find(c => c.id === conv.parent_id);
-                if (!parentConv || parentConv.source !== 'claude') {
+                if (!parentConv || parentConv.source !== conv.source) {
                     bar.classList.remove('show');
                     return;
                 }
@@ -1910,7 +1942,7 @@
             }
 
             document.getElementById('resumeCmdText').textContent = buildResumeCmd(
-                resumeSource, resumeId, projectDir, isBackground, model);
+                resumeSource, resumeId, projectDir, isBackground, model, conv);
             bar.classList.add('show');
         }
 
