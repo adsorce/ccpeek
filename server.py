@@ -27,6 +27,8 @@ TASK_NAME = 'CCPeek'
 CLAUDE_SOURCE = 'claude'
 CODEX_SOURCE = 'codex'
 OPENCODE_SOURCE = 'opencode'
+MIMOCODE_SOURCE = 'mimocode'
+_OPENCODE_SOURCES = {OPENCODE_SOURCE, MIMOCODE_SOURCE}
 CACHE_REFRESH_INTERVAL = 30
 
 _RE_MD_FENCED = re.compile(r'```[^\n]*\n(.*?)```', re.DOTALL)
@@ -241,7 +243,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if ':' not in conversation_id:
             return None, None
         source, raw_id = conversation_id.split(':', 1)
-        if source not in {CLAUDE_SOURCE, CODEX_SOURCE, OPENCODE_SOURCE} or not raw_id:
+        if source not in {CLAUDE_SOURCE, CODEX_SOURCE, *_OPENCODE_SOURCES} or not raw_id:
             return None, None
         return source, raw_id
 
@@ -288,7 +290,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return text[:200] + ('...' if len(text) > 200 else '')
 
     def _load_job_sessions(self):
-        """Load background job metadata, keyed by sessionId."""
         jobs_dir = os.path.expanduser('~/.claude/jobs')
         job_sessions = {}
         if os.path.exists(jobs_dir):
@@ -308,7 +309,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _read_claude_metadata(jsonl_file, claude_dir, project_dir_cache):
-        """Read Claude conversation metadata from a JSONL file."""
         with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
             first_line = f.readline()
             if not first_line:
@@ -480,8 +480,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         }
 
     _OPENCODE_VARIANTS = [
-        ('mimocode', 'mimocode.db', 'MiMoCode', 'mimo'),
-        ('opencode', 'opencode.db', 'OpenCode', 'opencode'),
+        ('mimocode', 'mimocode.db', 'MiMoCode', 'mimo', MIMOCODE_SOURCE),
+        ('opencode', 'opencode.db', 'OpenCode', 'opencode', OPENCODE_SOURCE),
     ]
 
     @staticmethod
@@ -491,22 +491,22 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         else:
             data_home = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
         found = []
-        for dir_name, db_name, label, cli in CCPeekHandler._OPENCODE_VARIANTS:
+        for dir_name, db_name, label, cli, source in CCPeekHandler._OPENCODE_VARIANTS:
             db_path = os.path.join(data_home, dir_name, db_name)
             if os.path.exists(db_path):
-                found.append((db_path, label, cli))
+                found.append((db_path, label, cli, source))
         return found
 
     @staticmethod
     def _read_opencode_sessions():
         results = []
-        for db_path, variant_label, variant_cli in CCPeekHandler._opencode_db_paths():
+        for db_path, variant_label, variant_cli, source in CCPeekHandler._opencode_db_paths():
             CCPeekHandler._read_opencode_db(
-                db_path, variant_label, variant_cli, results)
+                db_path, variant_label, variant_cli, source, results)
         return results
 
     @staticmethod
-    def _read_opencode_db(db_path, variant_label, variant_cli, results):
+    def _read_opencode_db(db_path, variant_label, variant_cli, source, results):
         try:
             db_mtime = os.stat(db_path).st_mtime
             conn = _sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
@@ -574,15 +574,15 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     except (OSError, ValueError, OverflowError):
                         pass
 
-                conv_id = CCPeekHandler._make_conversation_id(OPENCODE_SOURCE, sid)
+                conv_id = CCPeekHandler._make_conversation_id(source, sid)
                 results.append({
                     'id': conv_id,
-                    'source': OPENCODE_SOURCE,
+                    'source': source,
                     'source_id': sid,
                     'path': db_path,
                     'project_dir': row['directory'] or '',
                     'parent_id': (
-                        CCPeekHandler._make_conversation_id(OPENCODE_SOURCE, row['parent_id'])
+                        CCPeekHandler._make_conversation_id(source, row['parent_id'])
                         if row['parent_id'] else None),
                     'title': title,
                     'is_internal': False,
@@ -630,13 +630,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _collapse_user_text(text):
-        """Collapse skill injections, command tags, and meta-tag-only
-        user messages into a compact readable form.
-
-        Returns (collapsed_text, hidden) where hidden=True means the
-        message should be hidden by default (e.g. skill body content
-        that follows the command invocation in a separate message).
-        """
         if _RE_SKILL_INJECTION.match(text):
             return text, True
         if _RE_OPENCODE_SKILL_CONTENT.match(text):
@@ -805,6 +798,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def _load_opencode_events(entry, suppress_errors=False):
         events = []
+        src = entry.get('source', OPENCODE_SOURCE)
         db_path = entry.get('path', '')
         session_id = entry.get('source_id', '')
         if not db_path or not session_id:
@@ -855,34 +849,34 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     elif ptype == 'reasoning':
                         for t, h in text_parts:
                             CCPeekHandler._append_event(
-                                events, OPENCODE_SOURCE, role, 'message',
+                                events, src, role, 'message',
                                 timestamp, text=t, hidden_by_default=h)
                         text_parts.clear()
                         thinking = pd.get('text', '')
                         if thinking:
                             CCPeekHandler._append_event(
-                                events, OPENCODE_SOURCE, 'assistant',
+                                events, src, 'assistant',
                                 'thinking', timestamp, text=thinking)
                     elif ptype == 'tool':
                         for t, h in text_parts:
                             CCPeekHandler._append_event(
-                                events, OPENCODE_SOURCE, role, 'message',
+                                events, src, role, 'message',
                                 timestamp, text=t, hidden_by_default=h)
                         text_parts.clear()
                         state = pd.get('state', {})
                         tool_name = pd.get('tool', 'Tool')
                         tool_input = state.get('input', {})
                         CCPeekHandler._append_event(
-                            events, OPENCODE_SOURCE, 'assistant', 'tool_use',
+                            events, src, 'assistant', 'tool_use',
                             timestamp, name=tool_name, payload=tool_input)
                         if state.get('status') == 'completed':
                             CCPeekHandler._append_event(
-                                events, OPENCODE_SOURCE, 'assistant',
+                                events, src, 'assistant',
                                 'tool_result', timestamp,
                                 payload=state.get('output', ''))
                 for t, h in text_parts:
                     CCPeekHandler._append_event(
-                        events, OPENCODE_SOURCE, role, 'message',
+                        events, src, role, 'message',
                         timestamp, text=t, hidden_by_default=h)
             conn.close()
         except Exception:
@@ -900,7 +894,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         if source == CODEX_SOURCE:
             return CCPeekHandler._load_codex_events(
                 path, suppress_errors=suppress_errors)
-        if source == OPENCODE_SOURCE:
+        if source in _OPENCODE_SOURCES:
             return CCPeekHandler._load_opencode_events(
                 entry, suppress_errors=suppress_errors)
         return []
@@ -933,7 +927,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         session_file, session_index)
                     if entry and entry.get('source_id') == raw_id:
                         return entry
-        elif source == OPENCODE_SOURCE:
+        elif source in _OPENCODE_SOURCES:
             for entry in CCPeekHandler._read_opencode_sessions():
                 if entry.get('source_id') == raw_id:
                     return entry
@@ -956,7 +950,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return text_parts, thinking_parts
 
     def handle_conversations(self, include_internal=False):
-        """Serve conversations from the background-refreshed cache."""
         _conv_cache_ready.wait()
 
         conversations = []
@@ -972,6 +965,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 k: v for k, v in entry.items()
                 if k != 'is_internal' and not k.startswith('_')
             }
+            conv['is_automated'] = CCPeekHandler._is_automated_entry(entry)
             job = job_sessions.get(entry['source_id']) if entry.get('source') == CLAUDE_SOURCE else None
             if job and entry.get('source') == CLAUDE_SOURCE:
                 conv['is_background'] = True
@@ -990,7 +984,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         self._json_response(conversations, headers={'ETag': etag})
 
     def handle_conversation(self, conversation_id, include_internal=False):
-        """Get normalized transcript events for a specific conversation."""
         if '/' in conversation_id or '\\' in conversation_id:
             self._json_response({'error': 'Invalid conversation ID'}, 400)
             return
@@ -1038,10 +1031,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return text
 
     def _extract_content_parts(self, content):
-        """Extract text, tool, and thinking content separately from a message.
-
-        Returns: (text_content, tool_content, thinking_content) tuple of strings
-        """
         text_parts = []
         tool_parts = []
         thinking_parts = []
@@ -1073,7 +1062,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return (str(content), '', '')
 
     def _create_snippet(self, text, match_pos, max_len=200):
-        """Create a snippet around the match position."""
         context_before = 60
         context_after = max_len - context_before - 10
 
@@ -1091,54 +1079,14 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return snippet
 
     def _snippet_from_parts(self, parts, pattern, max_len=200):
-        """Find the message part containing the first match and snippet from it alone."""
         for part in parts:
             m = pattern.search(part)
             if m:
                 return self._create_snippet(part, m.start(), max_len)
         return ''
 
-    def _token_snippet_from_parts(self, parts, token_patterns, max_len=200):
-        """Find the message part containing the rarest token and snippet from it."""
-        for part in parts:
-            all_present = all(p.search(part) for _tok, p, _wp in token_patterns)
-            if not all_present:
-                continue
-            rarest_match = None
-            rarest_count = float('inf')
-            for _tok, p, _wp in token_patterns:
-                m = p.search(part)
-                if m:
-                    count = len(p.findall(part))
-                    if count < rarest_count:
-                        rarest_count = count
-                        rarest_match = m
-            if rarest_match:
-                return self._create_snippet(part, rarest_match.start(), max_len)
-        # Fallback: find any part with any token
-        rarest_match = None
-        rarest_count = float('inf')
-        best_part = None
-        for part in parts:
-            for _tok, p, _wp in token_patterns:
-                m = p.search(part)
-                if m:
-                    count = len(p.findall(part))
-                    if count < rarest_count:
-                        rarest_count = count
-                        rarest_match = m
-                        best_part = part
-        if rarest_match and best_part:
-            return self._create_snippet(best_part, rarest_match.start(), max_len)
-        return ''
-
     @staticmethod
     def _is_internal_thread(jsonl_path, first_user_title=None):
-        """Check if a conversation is a useless internal thread (local command output).
-
-        Note: Subagent threads are NOT considered internal - they contain useful context.
-        Only threads with local command markers are hidden by default.
-        """
         if first_user_title:
             if any(first_user_title.startswith(p) for p in CCPeekHandler._INTERNAL_PREFIXES):
                 return True
@@ -1194,7 +1142,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     @staticmethod
     def _build_search_cache():
-        """Populate _search_cache with normalized searchable blobs."""
         _conv_cache_ready.wait()
         with _conv_cache_lock:
             entries = list(_conv_cache.values())
@@ -1316,22 +1263,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             word_total += 1
         return total, word_total
 
-    def _token_snippet(self, text, token_patterns, max_len=200):
-        rarest_tok = None
-        rarest_count = float('inf')
-        rarest_match = None
-        for _tok, p, _wp in token_patterns:
-            m = p.search(text)
-            if m:
-                count = len(p.findall(text))
-                if count < rarest_count:
-                    rarest_count = count
-                    rarest_match = m
-                    rarest_tok = _tok
-        if rarest_match:
-            return self._create_snippet(text, rarest_match.start(), max_len)
-        return ''
-
     def _token_snippet_from_parts_fast(self, parts, token_patterns, max_len=200):
         lowered_tokens = [tok.lower() for tok, _, _ in token_patterns]
         for part in parts:
@@ -1364,14 +1295,6 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
 
     def handle_search(self, search_term, include_thinking=False,
                       include_automated=False, client_id='', request_seq=''):
-        """Search across all conversations for a term.
-
-        Returns all matches with is_internal flag so client can filter locally.
-        Uses _search_cache for speed; rebuilds only stale/new entries.
-        Phrases are matched exactly first; if the query has multiple tokens
-        and the exact phrase doesn't match, falls back to requiring all
-        tokens to appear independently (match_type="all_terms").
-        """
         if not search_term or len(search_term) < 2:
             self._json_response({'matches': {}})
             return
@@ -1506,7 +1429,6 @@ def is_port_in_use(host, port):
         return False
 
 def verify_ccpeek_instance(host, port):
-    """Verify that the service on host:port is actually ccpeek."""
     import http.client
     try:
         conn = http.client.HTTPConnection(host, port, timeout=2)
@@ -1569,7 +1491,6 @@ def open_browser(host, port):
             print(f"Could not auto-open browser. Please visit: {url}")
 
 def resolve_display_host(host):
-    """Provide a user-facing host string for status messages."""
     if host not in {'0.0.0.0', '::'}:
         return host
 
@@ -1601,10 +1522,7 @@ FIREWALL_RULE_NAME = 'CCPeek'
 
 
 def run_setup(port):
-    """Interactive first-time setup wizard.
-
-    Returns True if background service started successfully, False otherwise.
-    """
+    """Returns True if background service started successfully."""
     print("-- ccpeek setup --\n")
 
     mechanism = "Task Scheduler" if sys.platform == 'win32' else "systemd"
@@ -1761,7 +1679,6 @@ def run_restart():
 
 
 def _setup_systemd_service(port, enable):
-    """Create or remove the systemd user service."""
     if enable:
         bin_path = get_ccpeek_bin()
         unit = (
@@ -1829,7 +1746,6 @@ def _run_ps_elevated(ps_cmd):
 
 
 def _setup_windows_task(port, enable):
-    """Create or remove the Windows scheduled task."""
     if enable:
         pythonw = shutil.which('pythonw')
         if not pythonw:
@@ -2026,10 +1942,10 @@ def main(argv=None):
             opencode_dbs = CCPeekHandler._opencode_db_paths()
             if opencode_dbs:
                 try:
-                    db_mtimes = {p: os.stat(p).st_mtime for p, _, _ in opencode_dbs}
+                    db_mtimes = {p: os.stat(p).st_mtime for p, _, _, _ in opencode_dbs}
                     cached_opencode = {
                         eid: e for eid, e in existing_cache.items()
-                        if e.get('source') == OPENCODE_SOURCE
+                        if e.get('source') in _OPENCODE_SOURCES
                     }
                     if (cached_opencode and all(
                             e.get('_opencode_db_mtime') == db_mtimes.get(e.get('path'))

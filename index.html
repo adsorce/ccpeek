@@ -235,6 +235,12 @@
         }
 
         .source-badge.opencode {
+            background: #2d1a2d;
+            color: #e6a0e6;
+            border-color: #5c335c;
+        }
+
+        .source-badge.mimocode {
             background: #1a2d1a;
             color: #8ae6a0;
             border-color: #335c33;
@@ -1210,14 +1216,15 @@
             `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         let searchRequestSeq = 0;
 
-        const WORKTREE_RE = /-pr-\d+|-pr-[a-z]+-/;
+        const SOURCE_CONFIG = {
+            claude:   { label: 'Claude',   avatar: 'C', cssClass: 'claude' },
+            codex:    { label: 'Codex',    avatar: 'O', cssClass: 'codex' },
+            opencode: { label: 'OpenCode', avatar: 'O', cssClass: 'opencode' },
+            mimocode: { label: 'MiMoCode', avatar: 'M', cssClass: 'mimocode' },
+        };
+
         function isAutomatedConv(c) {
-            if (c.parent_id) return true;
-            if (WORKTREE_RE.test(folderName(c.project_dir))) return true;
-            const ep = c.entrypoint;
-            if (typeof ep === 'object') return true;
-            if (ep === 'sdk-cli' || ep === 'sdk') return true;
-            return false;
+            return !!c.is_automated;
         }
 
         function filterAgentThreads(conversations) {
@@ -1259,16 +1266,11 @@
         }
 
         function getSourceLabel(source, conv) {
-            if (source === 'codex') return 'Codex';
-            if (source === 'opencode') {
-                const c = conv || allConversations.find(c => c.id === currentConversation);
-                return (c && c.variant_label) || 'OpenCode';
-            }
-            return 'Claude';
+            return SOURCE_CONFIG[source]?.label || (conv || allConversations.find(c => c.id === currentConversation))?.variant_label || 'OpenCode';
         }
 
         function renderSourceBadge(source, conv) {
-            const cls = source === 'codex' ? 'codex' : source === 'opencode' ? 'opencode' : 'claude';
+            const cls = SOURCE_CONFIG[source]?.cssClass || 'claude';
             const active = sourceFilter === source ? ' active' : '';
             return `<span class="source-badge ${cls}${active}" onclick="toggleSourceFilter('${source}', event)">${escapeHtml(getSourceLabel(source, conv))}</span>`;
         }
@@ -1574,12 +1576,27 @@
             container.classList.toggle('thinking-all-expanded', includeThinking);
         }
 
+        function renderMessageShell({ cssClass, filterClass, index, avatar, avatarStyle, contentHtml, timestamp, extraAttrs }) {
+            const classes = ['message', cssClass, filterClass].filter(Boolean).join(' ');
+            const attrs = extraAttrs ? ' ' + extraAttrs : '';
+            return `
+        <div class="${classes}" data-message-index="${index}"${attrs}>
+            <div class="message-avatar"${avatarStyle ? ` style="${avatarStyle}"` : ''}>${avatar}</div>
+            <div class="message-content">
+                <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
+                <div class="message-text">${contentHtml}</div>
+                ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
+            </div>
+        </div>
+    `;
+        }
+
         function renderRun(items, highlightTerm) {
             const last = items[items.length - 1];
             const representative = items.find(it => !it.meta.isThinking) || last;
             const msg = representative.msg;
 
-            const avatar = msg.source === 'codex' ? 'O' : msg.source === 'opencode' ? 'M' : 'C';
+            const avatar = SOURCE_CONFIG[msg.source]?.avatar || 'C';
             const timestamp = last.msg.timestamp ? new Date(last.msg.timestamp).toLocaleString() : '';
 
             const contentParts = items.map(it => {
@@ -1599,16 +1616,14 @@
             }).join('');
 
             const dataIndices = items.map(it => it.index).join(',');
-            return `
-        <div class="message assistant" data-message-index="${representative.index}" data-run-indices="${dataIndices}" data-is-tool="false">
-            <div class="message-avatar">${avatar}</div>
-            <div class="message-content">
-                <button class="copy-btn" onclick="copyMessage(this, ${representative.index})">Copy</button>
-                <div class="message-text">${contentParts}</div>
-                ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
-            </div>
-        </div>
-    `;
+            return renderMessageShell({
+                cssClass: 'assistant',
+                index: representative.index,
+                avatar,
+                contentHtml: contentParts,
+                timestamp,
+                extraAttrs: `data-run-indices="${dataIndices}" data-is-tool="false"`,
+            });
         }
 
         function stripInlineMarkdown(text) {
@@ -1619,21 +1634,15 @@
             return text;
         }
 
-        function searchTermToPattern(term, forHtml) {
-            const broad = forHtml
-                ? '(?:\\n|\\\\n|<br\\s*/?>\\s*|\\s+)'
-                : '(?:\\n|\\\\n|\\s+)';
-            const narrow = forHtml
-                ? '(?:\\n|<br\\s*/?>\\s*|\\s+)'
-                : '(?:\\n|\\s+)';
-            const result = [];
+        function splitSearchTerm(term) {
+            const segments = [];
             let i = 0;
             while (i < term.length) {
                 if (i + 1 < term.length && term[i] === '\\' && term[i + 1] === 'n') {
-                    result.push(broad);
+                    segments.push({ type: 'broad' });
                     i += 2;
                 } else if (term[i] === '\n') {
-                    result.push(narrow);
+                    segments.push({ type: 'narrow' });
                     i += 1;
                 } else {
                     let j = i + 1;
@@ -1642,33 +1651,26 @@
                         if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
                         j++;
                     }
-                    result.push(escapeRegex(term.slice(i, j)));
+                    segments.push({ type: 'literal', text: term.slice(i, j) });
                     i = j;
                 }
             }
-            return result.join('');
+            return segments;
+        }
+
+        function searchTermToPattern(term, forHtml) {
+            const broad = forHtml ? '(?:\\n|\\\\n|<br\\s*/?>\\s*|\\s+)' : '(?:\\n|\\\\n|\\s+)';
+            const narrow = forHtml ? '(?:\\n|<br\\s*/?>\\s*|\\s+)' : '(?:\\n|\\s+)';
+            return splitSearchTerm(term).map(s =>
+                s.type === 'broad' ? broad : s.type === 'narrow' ? narrow : escapeRegex(s.text)
+            ).join('');
         }
 
         function searchTermToSnippetPattern(term) {
-            const result = [];
-            let i = 0;
-            while (i < term.length) {
-                if (i + 1 < term.length && term[i] === '\\' && term[i + 1] === 'n') {
-                    i += 2;
-                } else if (term[i] === '\n') {
-                    i += 1;
-                } else {
-                    let j = i + 1;
-                    while (j < term.length) {
-                        if (term[j] === '\n') break;
-                        if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
-                        j++;
-                    }
-                    result.push(escapeRegex(term.slice(i, j)));
-                    i = j;
-                }
-            }
-            return result.join('|');
+            return splitSearchTerm(term)
+                .filter(s => s.type === 'literal')
+                .map(s => escapeRegex(s.text))
+                .join('|');
         }
 
         function centerSnippet(snippet, term) {
@@ -1730,28 +1732,14 @@
 
             const htmlBroad = '(?:\\n|\\\\n|<br\\s*/?>\\s*|\\s+)';
             const htmlNarrow = '(?:\\n|<br\\s*/?>\\s*|\\s+)';
-            const parts = [];
             let numGroups = 0;
-            let i = 0;
-            while (i < term.length) {
-                if (i + 1 < term.length && term[i] === '\\' && term[i + 1] === 'n') {
-                    parts.push(htmlBroad);
-                    i += 2;
-                } else if (term[i] === '\n') {
-                    parts.push(htmlNarrow);
-                    i += 1;
-                } else {
-                    let j = i + 1;
-                    while (j < term.length) {
-                        if (term[j] === '\n') break;
-                        if (j + 1 < term.length && term[j] === '\\' && term[j + 1] === 'n') break;
-                        j++;
-                    }
-                    parts.push('(' + tagTolerantPattern(entityAwareEscaped(escapeRegex(term.slice(i, j)))) + ')');
-                    numGroups++;
-                    i = j;
-                }
-            }
+            const segs = splitSearchTerm(term);
+            const parts = segs.map(s => {
+                if (s.type === 'broad') return htmlBroad;
+                if (s.type === 'narrow') return htmlNarrow;
+                numGroups++;
+                return '(' + tagTolerantPattern(entityAwareEscaped(escapeRegex(s.text))) + ')';
+            });
 
             const regex = new RegExp(parts.join(''), 'gis');
             return text.replace(regex, function() {
@@ -1849,45 +1837,31 @@
             const content = formatContent(msg, meta, highlightTerm);
             const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
 
-            let avatar, avatarStyle, cssClass;
-            if (meta.isToolResult) {
-                avatar = '📤'; avatarStyle = 'background: transparent; font-size: 20px;';
-                cssClass = 'tool-result';
-            } else if (meta.isToolUse) {
-                avatar = '🔧'; avatarStyle = 'background: transparent; font-size: 20px;';
-                cssClass = 'assistant';
-            } else if (meta.isUser) {
-                avatar = 'U'; avatarStyle = '';
-                cssClass = 'user';
-            } else if (meta.isDeveloper) {
-                avatar = 'D'; avatarStyle = '';
-                cssClass = 'assistant';
-            } else {
-                avatar = msg.source === 'codex' ? 'O' : msg.source === 'opencode' ? 'M' : 'C'; avatarStyle = '';
-                cssClass = 'assistant';
-            }
+            const toolStyle = 'background: transparent; font-size: 20px;';
+            const [avatar, avatarStyle, cssClass] =
+                meta.isToolResult  ? ['📤', toolStyle, 'tool-result'] :
+                meta.isToolUse     ? ['🔧', toolStyle, 'assistant'] :
+                meta.isUser        ? ['U', '', 'user'] :
+                meta.isDeveloper   ? ['D', '', 'assistant'] :
+                                     [SOURCE_CONFIG[msg.source]?.avatar || 'C', '', 'assistant'];
 
             const filterClass = isTool && filterToolsEnabled ? 'tool-filtered' : '';
 
-            return `
-        <div class="message ${cssClass} ${filterClass}" data-message-index="${index}" data-is-tool="${isTool}">
-            <div class="message-avatar" ${avatarStyle ? `style="${avatarStyle}"` : ''}>${avatar}</div>
-            <div class="message-content">
-                <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
-                <div class="message-text">${content}</div>
-                ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
-            </div>
-        </div>
-    `;
+            return renderMessageShell({
+                cssClass,
+                filterClass,
+                index,
+                avatar,
+                avatarStyle,
+                contentHtml: content,
+                timestamp,
+                extraAttrs: `data-is-tool="${isTool}"`,
+            });
         }
 
         function closeOpenCodeFences(text) {
-            let open = 0;
-            const lines = text.split('\n');
-            for (const line of lines) {
-                if (/^(`{3,})/.test(line.trim())) open += 1;
-            }
-            return open % 2 !== 0 ? text + '\n```' : text;
+            const open = (text.match(/^\s*`{3,}/gm) || []).length;
+            return open % 2 ? text + '\n```' : text;
         }
 
         function folderName(projectDir) {
@@ -2023,7 +1997,7 @@
         function buildResumeCmd(source, convId, projectDir, isBackground, model, conv) {
             let resumePart;
             if (source === 'codex') resumePart = `codex resume ${convId}`;
-            else if (source === 'opencode') resumePart = `${(conv && conv.variant_cli) || 'opencode'} -s ${convId}`;
+            else if (source === 'opencode' || source === 'mimocode') resumePart = `${(conv && conv.variant_cli) || source} -s ${convId}`;
             else resumePart = `claude --resume ${convId}`;
             if (model) {
                 if (source === 'claude') resumePart += ` --model ${model}`;
@@ -2051,14 +2025,14 @@
                 return;
             }
             const conv = allConversations.find(c => c.id === currentConversation);
-            if (!conv || !['claude', 'codex', 'opencode'].includes(conv.source)) {
+            if (!conv || !['claude', 'codex', 'opencode', 'mimocode'].includes(conv.source)) {
                 bar.classList.remove('show');
                 return;
             }
 
             let resumeSource = conv.source;
             let resumeId, projectDir, isBackground, model;
-            if ((conv.source === 'claude' || conv.source === 'opencode') && conv.parent_id) {
+            if ((conv.source === 'claude' || conv.source === 'opencode' || conv.source === 'mimocode') && conv.parent_id) {
                 label.textContent = 'Resume parent:';
                 const parentConv = allConversations.find(c => c.id === conv.parent_id);
                 if (!parentConv || parentConv.source !== conv.source) {
@@ -2256,14 +2230,7 @@
             applySearchFilters();
         }
 
-        function updateMessageSearchResults() {
-            if (!currentConversation || allMessages.length === 0) return;
-
-            const isTokenMode = currentMatchType === 'all_terms' && currentTokens.length > 1;
-            const highlightArg = isTokenMode ? currentTokens : searchTerm;
-
-            renderMessages(allMessages, highlightArg);
-
+        function rebuildSearchResultsFromDOM() {
             const highlights = document.querySelectorAll('.message:not(.tool-filtered) .highlight[data-match-index]');
             const seen = new Set();
             searchResults = [];
@@ -2276,6 +2243,17 @@
                     searchResults.push({ messageIndex: msgIndex });
                 }
             });
+        }
+
+        function updateMessageSearchResults() {
+            if (!currentConversation || allMessages.length === 0) return;
+
+            const isTokenMode = currentMatchType === 'all_terms' && currentTokens.length > 1;
+            const highlightArg = isTokenMode ? currentTokens : searchTerm;
+
+            renderMessages(allMessages, highlightArg);
+
+            rebuildSearchResultsFromDOM();
 
             if (pendingLastMatch && searchResults.length > 0) {
                 pendingLastMatch = false;
@@ -2495,18 +2473,7 @@
             });
 
             if (searchTerm && searchResults.length > 0) {
-                const highlights = document.querySelectorAll('.message:not(.tool-filtered) .highlight[data-match-index]');
-                const seen = new Set();
-                searchResults = [];
-                highlights.forEach(el => {
-                    const idx = el.getAttribute('data-match-index');
-                    if (!seen.has(idx)) {
-                        seen.add(idx);
-                        const msg = el.closest('.message');
-                        const msgIndex = msg ? parseInt(msg.getAttribute('data-message-index'), 10) : 0;
-                        searchResults.push({ messageIndex: msgIndex });
-                    }
-                });
+                rebuildSearchResultsFromDOM();
                 currentSearchIndex = Math.min(currentSearchIndex, Math.max(0, searchResults.length - 1));
                 if (searchResults.length > 0) {
                     updateSearchInfo();
