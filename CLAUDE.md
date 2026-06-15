@@ -2,6 +2,10 @@
 
 Claude Code chat history viewer. Single-file Python server (`server.py`) serving a single-page app (`index.html`).
 
+## Status
+
+- MiMoCode/OpenCode transcript discovery must exclude imported Claude sessions across both legacy `claude_import` rows and newer `external_import` rows keyed by `*session_id`; otherwise Claude Code chats reappear as native MiMoCode/OpenCode duplicates.
+
 ## Running
 
 ccpeek runs on port 8888 via the Windows Scheduled Task "CCPeek" (or systemd user service on Linux). The task launches `pythonw.exe server.py --no-browser --port 8888` at login. Do not start a second instance; the port will already be in use.

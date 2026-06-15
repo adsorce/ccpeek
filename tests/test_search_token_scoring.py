@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,72 @@ from server import (
 
 
 class SearchTokenScoringTests(unittest.TestCase):
+    def test_opencode_import_filter_handles_nonstandard_session_id_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "mimocode.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    directory TEXT,
+                    parent_id TEXT,
+                    time_created INTEGER,
+                    time_updated INTEGER
+                );
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    time_created INTEGER,
+                    data TEXT
+                );
+                CREATE TABLE part (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT,
+                    time_created INTEGER,
+                    data TEXT
+                );
+                CREATE TABLE claude_import (
+                    imported_session_id TEXT
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)",
+                ("ses_imported", "New Session", "C:/proj", None, 1000, 2000),
+            )
+            conn.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?)",
+                (
+                    "msg1",
+                    "ses_imported",
+                    1000,
+                    json.dumps({"role": "assistant", "providerID": "anthropic", "modelID": "claude-opus-4-6"}),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO message VALUES (?, ?, ?, ?)",
+                ("msg2", "ses_imported", 1001, json.dumps({"role": "user"})),
+            )
+            conn.execute(
+                "INSERT INTO part VALUES (?, ?, ?, ?)",
+                ("part1", "msg2", 1001, json.dumps({"type": "text", "text": "Thanks for the call today!"})),
+            )
+            conn.execute(
+                "INSERT INTO claude_import VALUES (?)",
+                ("ses_imported",),
+            )
+            conn.commit()
+            conn.close()
+
+            results = []
+            CCPeekHandler._read_opencode_db(
+                str(db_path), "MiMoCode", "mimo", "mimocode", results
+            )
+
+        self.assertEqual(results, [])
+
     def test_search_cache_uses_live_file_stats_before_conv_cache_refresh(self):
         original_conv_cache = dict(_conv_cache)
         original_search_cache = dict(_search_cache)

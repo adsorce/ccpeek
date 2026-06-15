@@ -506,22 +506,62 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return results
 
     @staticmethod
+    def _read_imported_session_ids(conn, table_name, where_clause='', params=()):
+        c = conn.cursor()
+        c.execute(f'PRAGMA table_info("{table_name}")')
+        session_columns = []
+        for row in c.fetchall():
+            col_name = row['name'] if isinstance(row, _sqlite3.Row) else row[1]
+            if isinstance(col_name, str) and col_name.endswith('session_id'):
+                session_columns.append(col_name)
+
+        imported_ids = set()
+        for col_name in session_columns:
+            quoted = '"' + col_name.replace('"', '""') + '"'
+            query = f'SELECT DISTINCT {quoted} FROM "{table_name}"'
+            if where_clause:
+                query += f' WHERE {where_clause}'
+            try:
+                c.execute(query, params)
+            except _sqlite3.Error:
+                continue
+            for import_row in c.fetchall():
+                value = import_row[0]
+                if value:
+                    imported_ids.add(str(value))
+        return imported_ids
+
+    @staticmethod
     def _read_opencode_db(db_path, variant_label, variant_cli, source, results):
         try:
             db_mtime = os.stat(db_path).st_mtime
             conn = _sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
             conn.row_factory = _sqlite3.Row
             c = conn.cursor()
-            c.execute("""
+            c.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('claude_import', 'external_import')"
+            )
+            import_tables = {row['name'] for row in c.fetchall()}
+            imported_session_ids = set()
+            if 'claude_import' in import_tables:
+                imported_session_ids.update(
+                    CCPeekHandler._read_imported_session_ids(conn, 'claude_import'))
+            if 'external_import' in import_tables:
+                imported_session_ids.update(CCPeekHandler._read_imported_session_ids(
+                    conn, 'external_import', 'source = ?', ('cc',)))
+
+            c.execute(f"""
                 SELECT s.id, s.title, s.directory, s.parent_id,
                        s.time_created, s.time_updated
                 FROM session s
-                WHERE s.id NOT IN (SELECT session_id FROM claude_import)
                 ORDER BY s.time_updated DESC
             """)
             sessions = c.fetchall()
             for row in sessions:
                 sid = row['id']
+                if sid in imported_session_ids:
+                    continue
                 c2 = conn.cursor()
                 c2.execute("""
                     SELECT data FROM message
