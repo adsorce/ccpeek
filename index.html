@@ -597,21 +597,14 @@
             min-width: 0;
             line-height: 1.6;
             position: relative;
-        }
-
-        .message-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-
-        .message-role {
-            font-weight: 600;
-            font-size: 14px;
+            padding-right: 40px;
         }
 
         .copy-btn {
+            position: absolute;
+            top: 0;
+            right: 0;
+            z-index: 1;
             background: none;
             border: none;
             color: #666;
@@ -621,7 +614,12 @@
             font-size: 12px;
             transition: all 0.2s;
             opacity: 0;
+            user-select: none;
+            -webkit-user-select: none;
         }
+
+        .message-content { margin-top: -5px; }
+        .message { margin-bottom: 30px; padding-bottom: 30px; border-bottom: 1px dashed #222; }
 
         .message:hover .copy-btn {
             opacity: 1;
@@ -816,6 +814,48 @@
             font-style: normal;
         }
 
+        .thinking-block.collapsed {
+            background: none;
+            border: none;
+            padding: 0;
+            margin: 4px 0;
+            cursor: pointer;
+        }
+
+        .thinking-block.collapsed .thinking-summary {
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+            opacity: 0.6;
+            transition: opacity 0.15s;
+        }
+
+        .thinking-block.collapsed:hover .thinking-summary { opacity: 1; }
+
+        .thinking-block.collapsed .thinking-header,
+        .thinking-block.collapsed .thinking-content,
+        .thinking-block.collapsed .thinking-expand { display: none; }
+
+        .thinking-summary { display: none; }
+
+        .thinking-all-expanded .thinking-block.collapsed {
+            background: #1a1f2e;
+            border: 1px solid #2a3f5f;
+            border-radius: 6px;
+            padding: 12px;
+            margin: 8px 0;
+            cursor: default;
+            white-space: pre-wrap;
+            overflow: visible;
+        }
+        .thinking-block.collapsed + :not(.thinking-block) { margin-top: 15px; }
+
+        .thinking-all-expanded .thinking-block.collapsed .thinking-summary { display: none; }
+        .thinking-all-expanded .thinking-block.collapsed .thinking-header,
+        .thinking-all-expanded .thinking-block.collapsed .thinking-content { display: block; }
+        .thinking-all-expanded .thinking-block.collapsed .thinking-content { overflow: visible; }
+        .thinking-all-expanded .thinking-block.collapsed .thinking-content::after { display: none; }
+
         .tool-use {
             background: #1a1a1a;
             border: 1px solid #2a2a2a;
@@ -905,7 +945,7 @@
             margin-top: 4px;
         }
 
-        .message.tool-filtered {
+        .message.tool-filtered, .run-tool.tool-filtered {
             display: none;
         }
 
@@ -1259,8 +1299,8 @@
                     return false;
                 }
                 const nextConversations = await response.json();
-                const changed = true;
                 conversationListEtag = response.headers.get('ETag') || '';
+                const changed = JSON.stringify(nextConversations) !== JSON.stringify(allConversations);
                 allConversations = nextConversations;
                 if (changed) {
                     updateFolderFilterBar();
@@ -1449,16 +1489,82 @@
 
         let globalMatchIndex = 0;
 
+        function firstSentence(text) {
+            if (!text) return '';
+            const m = text.match(/^(.+?[.!?])(?:\s|$)/);
+            return m ? m[1] : text.split('\n')[0].slice(0, 120);
+        }
+
+        function attachThinkingToOutput(messages) {
+            const visible = [];
+            for (let i = 0; i < messages.length; i++) {
+                if (!messages[i].hidden_by_default) visible.push({ msg: messages[i], index: i, meta: classifyMessage(messages[i]) });
+            }
+            const attached = new Set();
+            const attachments = {};
+            for (let v = 0; v < visible.length; v++) {
+                if (visible[v].msg.kind !== 'thinking') continue;
+                for (let f = v + 1; f < visible.length; f++) {
+                    const fm = visible[f].msg;
+                    const fk = fm.kind;
+                    if ((fk === 'message' || fk === 'commentary') &&
+                        fm.role !== 'user' && fm.role !== 'developer') {
+                        const target = visible[f].index;
+                        if (!attachments[target]) attachments[target] = [];
+                        attachments[target].push(visible[v]);
+                        attached.add(visible[v].index);
+                        break;
+                    }
+                    if (fk !== 'thinking' && fk !== 'tool_use' && fk !== 'tool_result') break;
+                }
+            }
+            return { attached, attachments };
+        }
+
+        function groupAssistantRuns(messages) {
+            const { attached, attachments } = attachThinkingToOutput(messages);
+            const result = [];
+            let orphanRun = null;
+            for (let i = 0; i < messages.length; i++) {
+                const msg = messages[i];
+                if (msg.hidden_by_default || attached.has(i)) continue;
+                const meta = classifyMessage(msg);
+                const isOrphan = msg.kind === 'thinking' && !attachments[i];
+                const isTool = meta.isToolUse || meta.isToolResult;
+                if (isOrphan) {
+                    if (!orphanRun) orphanRun = { type: 'run', items: [] };
+                    orphanRun.items.push({ msg, index: i, meta });
+                } else if (isTool && orphanRun) {
+                    orphanRun.items.push({ msg, index: i, meta });
+                } else {
+                    if (orphanRun) { result.push(orphanRun); orphanRun = null; }
+                    if ((msg.kind === 'message' || msg.kind === 'commentary') &&
+                        !meta.isUser && !meta.isDeveloper && attachments[i]) {
+                        result.push({ type: 'run', items: [...attachments[i], { msg, index: i, meta }] });
+                    } else {
+                        result.push({ type: 'single', msg, index: i, meta });
+                    }
+                }
+            }
+            if (orphanRun) result.push(orphanRun);
+            return result;
+        }
+
         function renderMessages(messages, highlightTerm = '') {
             globalMatchIndex = 0;
             const container = document.getElementById('messagesContainer');
 
-            const messageHtml = messages.map((msg, index) => {
-                return renderMessage(msg, index, highlightTerm);
+            const runs = groupAssistantRuns(messages);
+            const messageHtml = runs.map(run => {
+                if (run.type === 'single') {
+                    if (run.msg.hidden_by_default) return '';
+                    return renderMessage(run.msg, run.index, highlightTerm);
+                }
+                return renderRun(run.items, highlightTerm);
             }).filter(html => html).join('');
 
             container.innerHTML = messageHtml || '<div class="empty-state"><p>No messages in this conversation</p></div>';
-            
+
             // Mark thinking blocks that overflow 200px so they get the fade + caret
             container.querySelectorAll('.thinking-content').forEach(el => {
                 el.classList.toggle('needs-fade', el.scrollHeight > 200);
@@ -1466,6 +1572,43 @@
 
             // Preserve expand-all state across re-renders
             container.classList.toggle('thinking-all-expanded', includeThinking);
+        }
+
+        function renderRun(items, highlightTerm) {
+            const last = items[items.length - 1];
+            const representative = items.find(it => !it.meta.isThinking) || last;
+            const msg = representative.msg;
+
+            const avatar = msg.source === 'codex' ? 'O' : msg.source === 'opencode' ? 'M' : 'C';
+            const timestamp = last.msg.timestamp ? new Date(last.msg.timestamp).toLocaleString() : '';
+
+            const contentParts = items.map(it => {
+                if (it.meta.isThinking) {
+                    const text = it.msg.text || '';
+                    const summary = escapeHtml(firstSentence(text));
+                    const full = escapeHtml(text);
+                    const fullHighlighted = highlightTerm && includeThinking ? highlightText(full, highlightTerm) : full;
+                    return `<div class="thinking-block collapsed" onclick="toggleThinkingBlock(this)" data-message-index="${it.index}"><div class="thinking-summary">${summary}</div><div class="thinking-header">💭 Thinking</div><div class="thinking-content">${fullHighlighted}</div><div class="thinking-expand" onclick="event.stopPropagation(); expandThinking(this.parentElement)">▼</div></div>`;
+                }
+                if (it.meta.isToolUse || it.meta.isToolResult) {
+                    const toolContent = formatContent(it.msg, it.meta, highlightTerm);
+                    const filterClass = filterToolsEnabled ? ' tool-filtered' : '';
+                    return `<div class="run-tool${filterClass}" data-is-tool="true" data-message-index="${it.index}">${toolContent}</div>`;
+                }
+                return formatContent(it.msg, it.meta, highlightTerm);
+            }).join('');
+
+            const dataIndices = items.map(it => it.index).join(',');
+            return `
+        <div class="message assistant" data-message-index="${representative.index}" data-run-indices="${dataIndices}" data-is-tool="false">
+            <div class="message-avatar">${avatar}</div>
+            <div class="message-content">
+                <button class="copy-btn" onclick="copyMessage(this, ${representative.index})">Copy</button>
+                <div class="message-text">${contentParts}</div>
+                ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
+            </div>
+        </div>
+    `;
         }
 
         function stripInlineMarkdown(text) {
@@ -1706,24 +1849,21 @@
             const content = formatContent(msg, meta, highlightTerm);
             const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
 
-            let avatar, avatarStyle, roleLabel, cssClass;
+            let avatar, avatarStyle, cssClass;
             if (meta.isToolResult) {
                 avatar = '📤'; avatarStyle = 'background: transparent; font-size: 20px;';
-                roleLabel = 'Tool Result'; cssClass = 'tool-result';
+                cssClass = 'tool-result';
             } else if (meta.isToolUse) {
                 avatar = '🔧'; avatarStyle = 'background: transparent; font-size: 20px;';
-                roleLabel = meta.toolName; cssClass = 'assistant';
+                cssClass = 'assistant';
             } else if (meta.isUser) {
                 avatar = 'U'; avatarStyle = '';
-                roleLabel = 'User'; cssClass = 'user';
+                cssClass = 'user';
             } else if (meta.isDeveloper) {
                 avatar = 'D'; avatarStyle = '';
-                roleLabel = 'Developer'; cssClass = 'assistant';
+                cssClass = 'assistant';
             } else {
                 avatar = msg.source === 'codex' ? 'O' : msg.source === 'opencode' ? 'M' : 'C'; avatarStyle = '';
-                roleLabel = meta.isCommentary
-                    ? `${getSourceLabel(msg.source)} Commentary`
-                    : getSourceLabel(msg.source);
                 cssClass = 'assistant';
             }
 
@@ -1733,10 +1873,7 @@
         <div class="message ${cssClass} ${filterClass}" data-message-index="${index}" data-is-tool="${isTool}">
             <div class="message-avatar" ${avatarStyle ? `style="${avatarStyle}"` : ''}>${avatar}</div>
             <div class="message-content">
-                <div class="message-header">
-                    <div class="message-role">${roleLabel}</div>
-                    <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
-                </div>
+                <button class="copy-btn" onclick="copyMessage(this, ${index})">Copy</button>
                 <div class="message-text">${content}</div>
                 ${timestamp ? `<div class="timestamp">${timestamp}</div>` : ''}
             </div>
@@ -2381,7 +2518,15 @@
             }
         }
 
+        function toggleThinkingBlock(block) {
+            if (!block.classList.contains('collapsed')) return;
+            block.classList.remove('collapsed');
+            const content = block.querySelector('.thinking-content');
+            if (content) content.classList.toggle('needs-fade', content.scrollHeight > 200);
+        }
+
         function expandThinking(block) {
+            block.classList.remove('collapsed');
             const content = block.querySelector('.thinking-content');
             const expand = block.querySelector('.thinking-expand');
             if (expand) expand.style.visibility = 'hidden';
