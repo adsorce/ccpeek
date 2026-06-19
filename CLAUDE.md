@@ -5,6 +5,7 @@ Claude Code chat history viewer. Single-file Python server (`server.py`) serving
 ## Status
 
 - MiMoCode/OpenCode transcript discovery must exclude imported Claude sessions across both legacy `claude_import` rows and newer `external_import` rows keyed by `*session_id`; otherwise Claude Code chats reappear as native MiMoCode/OpenCode duplicates.
+- Sidebar conversation refresh now patches keyed `.conversation-item` nodes in place, so active search tabs can stay fresh without forcing a full sidebar DOM rebuild on each poll.
 
 ## Running
 

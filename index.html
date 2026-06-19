@@ -1275,6 +1275,48 @@
             return `<span class="source-badge ${cls}${active}" onclick="toggleSourceFilter('${source}', event)">${escapeHtml(getSourceLabel(source, conv))}</span>`;
         }
 
+        function buildConversationItemMarkup(conv, searchMatches = {}) {
+            const dateStr = formatRelativeTime(conv.modified * 1000);
+            const matchData = searchMatches[conv.id];
+            const hasMatches = matchData && (
+                typeof matchData === 'object'
+                    ? (matchData.count > 0 || matchData.titleMatch)
+                    : matchData > 0
+            );
+            const matchCount = matchData ? (typeof matchData === 'object' ? matchData.count : matchData) : 0;
+            const rawSnippet = matchData && typeof matchData === 'object' ? matchData.snippet : '';
+            const snippet = centerSnippet(rawSnippet, matchData?.match_type === 'proximity' ? searchTerm.trim().split(/\s+/).filter(t => t.length > 1) : (matchData?.tokens || searchTerm));
+            const matchLabel = !hasMatches ? '' :
+                (matchData?.titleMatch && matchCount === 0
+                    ? 'title match'
+                    : matchData?.match_type === 'proximity'
+                        ? `${matchCount} near`
+                        : `${matchCount} match${matchCount === 1 ? '' : 'es'}`);
+
+            return `
+                <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
+                     data-id="${conv.id}"
+                     onclick="loadConversation('${conv.id}')">
+                    <div class="conversation-title-row">
+                        <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
+                        ${renderSourceBadge(conv.source, conv)}
+                    </div>
+                    ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
+                    <div class="conversation-meta">
+                        <span>${dateStr}</span>
+                        ${(() => { const f = folderName(conv.project_dir); return f ? `<span class="folder-pill${folderFilter === f ? ' active' : ''}" onclick="toggleFolderFilter('${f.replace(/'/g, "\\'")}', event)" title="${escapeHtml(conv.project_dir)}">${escapeHtml(f)}</span>` : ''; })()}
+                        ${hasMatches ? `<span class="match-count" style="margin-left:auto">${matchLabel}</span>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function createConversationItem(markup) {
+            const template = document.createElement('template');
+            template.innerHTML = markup.trim();
+            return template.content.firstElementChild;
+        }
+
         function toggleSourceFilter(source, event) {
             event.stopPropagation();
             sourceFilter = sourceFilter === source ? null : source;
@@ -1306,7 +1348,11 @@
                 allConversations = nextConversations;
                 if (changed) {
                     updateFolderFilterBar();
-                    renderConversations(filterAgentThreads(allConversations));
+                    if (searchTerm) {
+                        applySearchFilters({ skipMessages: true });
+                    } else {
+                        renderConversations(filterAgentThreads(allConversations));
+                    }
                 }
                 return changed;
             } catch (error) {
@@ -1327,39 +1373,47 @@
                 return;
             }
 
-            container.innerHTML = conversations.map(conv => {
-                const dateStr = formatRelativeTime(conv.modified * 1000);
-                const matchData = searchMatches[conv.id];
-                const hasMatches = matchData && (
-                    typeof matchData === 'object'
-                        ? (matchData.count > 0 || matchData.titleMatch)
-                        : matchData > 0
-                );
-                const matchCount = matchData ? (typeof matchData === 'object' ? matchData.count : matchData) : 0;
-                const rawSnippet = matchData && typeof matchData === 'object' ? matchData.snippet : '';
-                const snippet = centerSnippet(rawSnippet, matchData?.tokens || searchTerm);
-                const matchLabel = !hasMatches ? '' :
-                    (matchData?.titleMatch && matchCount === 0
-                        ? 'title match'
-                        : `${matchCount} ${matchData?.wordCount === 0 ? 'partial ' : ''}match${matchCount === 1 ? '' : 'es'}`);
+            const existingItems = new Map(
+                Array.from(container.querySelectorAll('.conversation-item')).map(
+                    el => [el.getAttribute('data-id'), el])
+            );
+            const desiredNodes = conversations.map(conv => {
+                const stableKey = JSON.stringify([conv, searchMatches[conv.id] || null, searchTerm || '', folderFilter || '']);
+                const existing = existingItems.get(conv.id);
+                if (existing && existing._stableKey === stableKey) {
+                    return existing;
+                }
+                const markup = buildConversationItemMarkup(conv, searchMatches);
+                const next = createConversationItem(markup);
+                next._stableKey = stableKey;
+                if (existing) {
+                    existing.replaceWith(next);
+                }
+                existingItems.set(conv.id, next);
+                return next;
+            });
 
-                return `
-                    <div class="conversation-item ${hasMatches ? 'matches-search' : ''} ${conv.id === currentConversation ? 'active' : ''}"
-                         data-id="${conv.id}"
-                         onclick="loadConversation('${conv.id}')">
-                        <div class="conversation-title-row">
-                            <div class="conversation-title truncate">${hasMatches && searchTerm ? highlightSidebar(escapeHtml(conv.title), matchData) : escapeHtml(conv.title)}</div>
-                            ${renderSourceBadge(conv.source, conv)}
-                        </div>
-                        ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
-                        <div class="conversation-meta">
-                            <span>${dateStr}</span>
-                            ${(() => { const f = folderName(conv.project_dir); return f ? `<span class="folder-pill${folderFilter === f ? ' active' : ''}" onclick="toggleFolderFilter('${f.replace(/'/g, "\\'")}', event)" title="${escapeHtml(conv.project_dir)}">${escapeHtml(f)}</span>` : ''; })()}
-                            ${hasMatches ? `<span class="match-count" style="margin-left:auto">${matchLabel}</span>` : ''}
-                        </div>
-                    </div>
-                `;
-            }).join('');
+            Array.from(container.children).forEach(child => {
+                if (!child.classList.contains('conversation-item')) {
+                    child.remove();
+                }
+            });
+
+            let cursor = container.firstElementChild;
+            desiredNodes.forEach(el => {
+                if (el === cursor) {
+                    cursor = cursor.nextElementSibling;
+                    return;
+                }
+                container.insertBefore(el, cursor);
+            });
+
+            const keep = new Set(desiredNodes);
+            Array.from(container.querySelectorAll('.conversation-item')).forEach(el => {
+                if (!keep.has(el)) {
+                    el.remove();
+                }
+            });
 
             syncSelectedConvIndex();
             requestAnimationFrame(updateSidebarScrollbar);
@@ -1470,9 +1524,9 @@
 
                 if (searchTerm) {
                     const matchData = rawSearchMatches[conversationId];
-                    if (matchData?.match_type === 'all_terms' && matchData.tokens) {
-                        currentMatchType = 'all_terms';
-                        currentTokens = matchData.tokens;
+                    if (matchData?.match_type === 'proximity') {
+                        currentMatchType = 'proximity';
+                        currentTokens = searchTerm.trim().split(/\s+/).filter(t => t.length > 1);
                     } else {
                         currentMatchType = 'phrase';
                         currentTokens = [];
@@ -1552,27 +1606,40 @@
             return result;
         }
 
-        function renderMessages(messages, highlightTerm = '') {
-            globalMatchIndex = 0;
+        function renderMessages(messages, highlightTerm = '', { append = false } = {}) {
             const container = document.getElementById('messagesContainer');
-
             const runs = groupAssistantRuns(messages);
-            const messageHtml = runs.map(run => {
-                if (run.type === 'single') {
-                    if (run.msg.hidden_by_default) return '';
-                    return renderMessage(run.msg, run.index, highlightTerm);
-                }
-                return renderRun(run.items, highlightTerm);
-            }).filter(html => html).join('');
 
-            container.innerHTML = messageHtml || '<div class="empty-state"><p>No messages in this conversation</p></div>';
+            const existingNodes = container.querySelectorAll(':scope > .message');
+            if (append && existingNodes.length && existingNodes.length <= runs.length) {
+                const newRuns = runs.slice(existingNodes.length);
+                if (!newRuns.length) return;
+                const fragment = document.createDocumentFragment();
+                newRuns.forEach(run => {
+                    const html = run.type === 'single'
+                        ? renderMessage(run.msg, run.index, highlightTerm)
+                        : renderRun(run.items, highlightTerm);
+                    if (!html) return;
+                    const tpl = document.createElement('template');
+                    tpl.innerHTML = html.trim();
+                    fragment.appendChild(tpl.content.firstElementChild);
+                });
+                container.appendChild(fragment);
+            } else {
+                globalMatchIndex = 0;
+                const messageHtml = runs.map(run => {
+                    if (run.type === 'single') {
+                        if (run.msg.hidden_by_default) return '';
+                        return renderMessage(run.msg, run.index, highlightTerm);
+                    }
+                    return renderRun(run.items, highlightTerm);
+                }).filter(html => html).join('');
+                container.innerHTML = messageHtml || '<div class="empty-state"><p>No messages in this conversation</p></div>';
+            }
 
-            // Mark thinking blocks that overflow 200px so they get the fade + caret
             container.querySelectorAll('.thinking-content').forEach(el => {
                 el.classList.toggle('needs-fade', el.scrollHeight > 200);
             });
-
-            // Preserve expand-all state across re-renders
             container.classList.toggle('thinking-all-expanded', includeThinking);
         }
 
@@ -1693,9 +1760,14 @@
         }
 
         function highlightSidebar(html, matchData) {
-            const pat = matchData?.tokens
-                ? matchData.tokens.map(escapeRegex).join('|')
-                : searchTermToSnippetPattern(searchTerm);
+            if (matchData?.match_type === 'proximity') {
+                const tokens = searchTerm.trim().split(/\s+/).filter(t => t.length > 1);
+                if (!tokens.length) return html;
+                const pat = tokens.map(t => '\\b' + escapeRegex(t) + '\\b').join('|');
+                return html.replace(new RegExp(`(${pat})`, 'gi'), '<span class="highlight">$1</span>');
+            }
+            const pat = searchTermToSnippetPattern(searchTerm);
+            if (!pat) return html;
             return html.replace(new RegExp(`(${pat})`, 'gis'), '<span class="highlight">$1</span>');
         }
 
@@ -1713,20 +1785,33 @@
             ).join('');
         }
 
+        function safeHighlightReplace(html, regex, replacer) {
+            const tagRe = /<[^>]*>/g;
+            let result = '', lastIdx = 0, m;
+            while ((m = tagRe.exec(html)) !== null) {
+                const textChunk = html.slice(lastIdx, m.index);
+                if (textChunk) result += textChunk.replace(regex, replacer);
+                result += m[0];
+                lastIdx = tagRe.lastIndex;
+            }
+            const tail = html.slice(lastIdx);
+            if (tail) result += tail.replace(regex, replacer);
+            return result;
+        }
+
         function highlightText(text, term) {
             if (!term) return text;
             if (Array.isArray(term)) return highlightTokens(text, term);
-            const t = '(?:<[^>]*>)*';
 
             const hasNewlines = term.includes('\n') || /\\n/.test(term);
             if (!hasNewlines) {
-                const pattern = tagTolerantPattern(entityAwareEscaped(escapeRegex(term)));
+                const pattern = entityAwareEscaped(escapeRegex(term));
                 const regex = new RegExp(`(${pattern})`, 'gi');
-                return text.replace(regex, (match) => {
+                return safeHighlightReplace(text, regex, (match) => {
                     const cls = 'highlight';
                     const idx = globalMatchIndex;
                     globalMatchIndex++;
-                    return wrapTextSegments(match, cls, idx);
+                    return `<span class="${cls}" data-match-index="${idx}">${match}</span>`;
                 });
             }
 
@@ -1764,14 +1849,16 @@
         }
 
         function highlightTokens(text, tokens) {
-            const alts = tokens.map(tok =>
-                '\\b' + tagTolerantPattern(entityAwareEscaped(escapeRegex(tok))) + '\\b').join('|');
+            const usable = tokens.filter(tok => tok.length > 1);
+            if (!usable.length) return text;
+            const alts = usable.map(tok =>
+                '\\b' + entityAwareEscaped(escapeRegex(tok)) + '\\b').join('|');
             const regex = new RegExp(`(${alts})`, 'gi');
-            return text.replace(regex, (match) => {
+            return safeHighlightReplace(text, regex, (match) => {
                 const cls = 'highlight';
                 const idx = globalMatchIndex;
                 globalMatchIndex++;
-                return wrapTextSegments(match, cls, idx);
+                return `<span class="${cls}" data-match-index="${idx}">${match}</span>`;
             });
         }
 
@@ -2081,7 +2168,7 @@
             performSearch('');
         }
         
-        function applySearchFilters() {
+        function applySearchFilters({ skipMessages = false } = {}) {
             const container = document.getElementById('conversationsList');
 
             const filteredMatches = {};
@@ -2106,7 +2193,7 @@
                         snippet: match.snippet || '',
                         titleMatch: false,
                     };
-                    if (match.tokens) entry.tokens = match.tokens;
+                    if (match.match_type) entry.match_type = match.match_type;
                     filteredMatches[convId] = entry;
                 }
             }
@@ -2144,8 +2231,8 @@
             const halfLife = 3;
             filteredConversations.sort((a, b) => {
                 const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
-                const isPhraseA = rawSearchMatches[a.id]?.match_type === 'all_terms' ? 0 : 1;
-                const isPhraseB = rawSearchMatches[b.id]?.match_type === 'all_terms' ? 0 : 1;
+                const isPhraseA = rawSearchMatches[a.id]?.match_type === 'proximity' ? 0 : 1;
+                const isPhraseB = rawSearchMatches[b.id]?.match_type === 'proximity' ? 0 : 1;
                 if (isPhraseA !== isPhraseB) return isPhraseB - isPhraseA;
                 const hasWordA = mA.sortWordCount > 0 ? 1 : 0;
                 const hasWordB = mB.sortWordCount > 0 ? 1 : 0;
@@ -2163,14 +2250,13 @@
                 renderConversations(filteredConversations, filteredMatches);
             }
 
-            // Update message highlighting if a conversation is loaded
-            if (currentConversation && allMessages.length > 0) {
+            if (!skipMessages && currentConversation && allMessages.length > 0) {
                 updateMessageSearchResults();
             }
         }
 
         async function performSearch(term) {
-            searchTerm = term.toLowerCase();
+            searchTerm = term.trim().toLowerCase();
 
             document.getElementById('clearSearch').classList.toggle('show', !!searchTerm);
 
@@ -2248,8 +2334,8 @@
         function updateMessageSearchResults() {
             if (!currentConversation || allMessages.length === 0) return;
 
-            const isTokenMode = currentMatchType === 'all_terms' && currentTokens.length > 1;
-            const highlightArg = isTokenMode ? currentTokens : searchTerm;
+            const highlightArg = currentMatchType === 'proximity' && currentTokens.length
+                ? currentTokens : searchTerm;
 
             renderMessages(allMessages, highlightArg);
 
@@ -2623,15 +2709,26 @@
         });
 
         setInterval(async () => {
-            if (searchTerm) return;
             const container = document.getElementById('conversationsList');
             const scrollTop = container.scrollTop;
             const activeId = currentConversation;
             const changed = await loadConversations();
-            if (!changed) return;
-            container.scrollTop = scrollTop;
+            if (changed) {
+                container.scrollTop = scrollTop;
+                if (activeId) {
+                    document.querySelector(`[data-id="${activeId}"]`)?.classList.add('active');
+                }
+            }
             if (activeId) {
-                document.querySelector(`[data-id="${activeId}"]`)?.classList.add('active');
+                try {
+                    const resp = await fetch(`/api/conversation/${activeId}?include_internal=true`);
+                    const data = await resp.json();
+                    if (currentConversation !== activeId || data.error) return;
+                    if (data.length > allMessages.length) {
+                        allMessages = data;
+                        renderMessages(allMessages, searchTerm || '', { append: true });
+                    }
+                } catch {}
             }
         }, 30000);
 

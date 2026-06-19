@@ -1292,31 +1292,83 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             current = _search_request_state.get(client_id)
         return current is not None and request_seq < current
 
-    def _token_search(self, text, token_patterns, lower_text=None):
-        lower_text = text.lower() if lower_text is None else lower_text
-        total = 0
-        word_total = 0
-        for _tok, _p, _wp in token_patterns:
-            if _tok.lower() not in lower_text:
+    @staticmethod
+    def _token_proximity_search(text, token_patterns, window=50):
+        positions = []
+        for _tok, _p, wp in token_patterns:
+            hits = [m.start() for m in wp.finditer(text)]
+            if not hits:
                 return None
-            total += 1
-            word_total += 1
-        return total, word_total
+            positions.append(hits)
+        count = 0
+        anchor = positions[0]
+        others = positions[1:]
+        for pos in anchor:
+            lo, hi = pos, pos
+            if all(
+                any(lo - window <= p <= hi + window for p in ps)
+                for ps in others
+            ):
+                count += 1
+        if not count:
+            return None
+        return count
 
     def _token_snippet_from_parts_fast(self, parts, token_patterns, max_len=200):
-        lowered_tokens = [tok.lower() for tok, _, _ in token_patterns]
+        joined = '\n'.join(parts)
+        result = self._find_token_cluster(joined, token_patterns)
+        if result is not None:
+            first_pos, last_pos = result
+            span = last_pos - first_pos
+            lead = max(3, min(15, 50 - span))
+            start = max(0, first_pos - lead)
+            end = min(len(joined), start + max_len)
+            snippet = ' '.join(joined[start:end].split())
+            if start > 0:
+                snippet = '...' + snippet
+            if end < len(joined):
+                snippet = snippet + '...'
+            return snippet
+        meaningful = [(t, p, wp) for t, p, wp in token_patterns if len(t) > 1]
+        fallback = meaningful or token_patterns
         for part in parts:
-            part_lower = part.lower()
-            if all(tok in part_lower for tok in lowered_tokens):
-                first_pos = min(part_lower.find(tok) for tok in lowered_tokens)
-                return self._create_snippet(part, first_pos, max_len)
-        for part in parts:
-            part_lower = part.lower()
-            for tok in lowered_tokens:
-                pos = part_lower.find(tok)
-                if pos != -1:
-                    return self._create_snippet(part, pos, max_len)
+            for _tok, _p, wp in fallback:
+                m = wp.search(part)
+                if m:
+                    return self._create_snippet(part, m.start(), max_len)
         return ''
+
+    @staticmethod
+    def _find_token_cluster(text, token_patterns, window=50):
+        positions = []
+        for _tok, _p, wp in token_patterns:
+            hits = [m.start() for m in wp.finditer(text)]
+            if not hits:
+                return None
+            positions.append(hits)
+        anchor = positions[0]
+        others = positions[1:]
+        best = None
+        for pos in anchor:
+            cluster_positions = [pos]
+            found_all = True
+            for ps in others:
+                nearest = None
+                for p in ps:
+                    if pos - window <= p <= pos + window:
+                        if nearest is None or abs(p - pos) < abs(nearest - pos):
+                            nearest = p
+                if nearest is None:
+                    found_all = False
+                    break
+                cluster_positions.append(nearest)
+            if found_all:
+                span = max(cluster_positions) - min(cluster_positions)
+                if best is None or span < best[0]:
+                    best = (span, min(cluster_positions), max(cluster_positions))
+        if best:
+            return best[1], best[2]
+        return None
 
     _WORKTREE_RE = re.compile(r'-pr-\d+|-pr-[a-z]+-')
 
@@ -1424,35 +1476,31 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             if not token_patterns:
                 continue
 
-            text_tok = self._token_search(
-                text_blob, token_patterns, lower_text=text_lower)
-            think_tok = None
+            text_prox = self._token_proximity_search(
+                text_blob, token_patterns)
+            think_prox = None
             if include_thinking and thinking_blob:
-                think_tok = self._token_search(
-                    thinking_blob, token_patterns, lower_text=thinking_lower)
+                think_prox = self._token_proximity_search(
+                    thinking_blob, token_patterns)
 
-            if not text_tok and not think_tok:
+            if not text_prox and not think_prox:
                 continue
-
-            t_count, t_wcount = text_tok or (0, 0)
-            th_count, th_wcount = think_tok or (0, 0)
 
             snippet = self._token_snippet_from_parts_fast(
                 entry['text_parts'],
-                token_patterns) if text_tok else ''
-            if not snippet and think_tok:
+                token_patterns) if text_prox else ''
+            if not snippet and think_prox:
                 snippet = self._token_snippet_from_parts_fast(
                     entry['thinking_parts'], token_patterns)
 
             matches[conv_id] = {
-                'text_count': t_count,
-                'thinking_count': th_count,
-                'text_word_count': t_wcount,
-                'thinking_word_count': th_wcount,
+                'text_count': text_prox or 0,
+                'thinking_count': think_prox or 0,
+                'text_word_count': text_prox or 0,
+                'thinking_word_count': think_prox or 0,
                 'is_internal': entry['is_internal'],
                 'snippet': snippet or '',
-                'match_type': 'all_terms',
-                'tokens': [tok for tok, _, _ in token_patterns],
+                'match_type': 'proximity',
             }
 
         self._json_response({'matches': matches})
