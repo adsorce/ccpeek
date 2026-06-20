@@ -94,11 +94,20 @@
             flex-wrap: wrap;
             justify-content: center;
             gap: 4px;
-            padding: 6px 8px;
-            border-bottom: 1px solid #2a2a2a;
+            padding: 10px 8px 2px;
+            border-bottom: none;
             flex-shrink: 0;
         }
         .folder-filter-bar.show { display: flex; }
+
+        .search-mode-bar {
+            display: none;
+            justify-content: center;
+            gap: 4px;
+            padding: 2px 8px 10px;
+            flex-shrink: 0;
+        }
+        .search-mode-bar.show { display: flex; }
         .folder-chip {
             font-size: 11px;
             color: #999;
@@ -111,6 +120,20 @@
         }
         .folder-chip:hover { border-color: #ffffff30; color: #ccc; }
         .folder-chip.active { background: #4a9eff22; border-color: #4a9eff55; color: #4a9eff; }
+        .folder-filter-bar.has-active .folder-chip:not(.active) { opacity: 0.45; }
+        .search-mode-chip {
+            font-size: 11px;
+            color: #999;
+            background: #ffffff08;
+            border: 1px solid #ffffff15;
+            border-radius: 4px;
+            padding: 2px 8px;
+            cursor: pointer;
+            white-space: nowrap;
+            opacity: 0.45;
+        }
+        .search-mode-chip:hover { border-color: #ffffff30; color: #ccc; opacity: 1; }
+        .search-mode-chip.active { background: #ffd74022; border-color: #ffd74055; color: #ffd740; opacity: 1; }
 
         .conversations-list-wrap {
             flex: 1;
@@ -119,9 +142,10 @@
         }
 
         .conversations-list {
-            height: 100%;
+            height: calc(100% - 8px);
+            margin-top: 8px;
             overflow-y: auto;
-            padding: 8px;
+            padding: 0 8px 8px;
             background: #171717;
             scrollbar-width: none;
             -ms-overflow-style: none;
@@ -134,9 +158,9 @@
 
         .sidebar-scrollbar {
             position: absolute;
-            top: 0;
+            top: 8px;
             right: 0;
-            bottom: 0;
+            bottom: 8px;
             width: 8px;
             opacity: 0;
             pointer-events: none;
@@ -1133,6 +1157,7 @@
         <!-- Row 2: list + conversation -->
         <div class="conversations-pane" id="conversationsPane">
             <div class="folder-filter-bar" id="folderFilterBar"></div>
+            <div class="search-mode-bar" id="searchModeBar"></div>
             <div class="conversations-list-wrap">
                 <div class="conversations-list" id="conversationsList">
                     <div class="loading">Loading conversations...</div>
@@ -1215,6 +1240,7 @@
         const searchClientId = window.crypto?.randomUUID?.() ||
             `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         let searchRequestSeq = 0;
+        let searchSortMode = 'recency';
 
         const SOURCE_CONFIG = {
             claude:   { label: 'Claude',   avatar: 'C', cssClass: 'claude' },
@@ -1262,6 +1288,7 @@
             bar.innerHTML = sorted.map(([name, count]) =>
                 `<span class="folder-chip${folderFilter === name ? ' active' : ''}" onclick="toggleFolderFilter('${name.replace(/'/g, "\\'")}', event)" title="${count} conversations">${escapeHtml(name)}</span>`
             ).join('');
+            bar.classList.toggle('has-active', !!folderFilter);
             bar.classList.add('show');
         }
 
@@ -2168,6 +2195,21 @@
             performSearch('');
         }
         
+        function renderSearchModeBar(visible) {
+            const bar = document.getElementById('searchModeBar');
+            if (!visible) { bar.classList.remove('show'); return; }
+            bar.innerHTML = ['recency', 'relevance'].map(mode =>
+                `<span class="search-mode-chip${searchSortMode === mode ? ' active' : ''}" onclick="setSearchMode('${mode}')">${mode.charAt(0).toUpperCase() + mode.slice(1)}</span>`
+            ).join('');
+            bar.classList.add('show');
+        }
+
+        function setSearchMode(mode) {
+            searchSortMode = mode;
+            renderSearchModeBar(true);
+            applySearchFilters();
+        }
+
         function applySearchFilters({ skipMessages = false } = {}) {
             const container = document.getElementById('conversationsList');
 
@@ -2226,21 +2268,30 @@
                 return match && (match.count > 0 || match.titleMatch);
             });
 
-            // Phrase matches tier above all_terms, whole-word above partial, then score * recency
-            const now = Date.now() / 1000;
-            const halfLife = 3;
-            filteredConversations.sort((a, b) => {
-                const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
-                const isPhraseA = rawSearchMatches[a.id]?.match_type === 'proximity' ? 0 : 1;
-                const isPhraseB = rawSearchMatches[b.id]?.match_type === 'proximity' ? 0 : 1;
-                if (isPhraseA !== isPhraseB) return isPhraseB - isPhraseA;
-                const hasWordA = mA.sortWordCount > 0 ? 1 : 0;
-                const hasWordB = mB.sortWordCount > 0 ? 1 : 0;
-                if (hasWordA !== hasWordB) return hasWordB - hasWordA;
-                const recencyA = Math.pow(2, -((now - (a.modified || 0)) / 86400) / halfLife);
-                const recencyB = Math.pow(2, -((now - (b.modified || 0)) / 86400) / halfLife);
-                return mB.matchScore * recencyB - mA.matchScore * recencyA;
-            });
+            if (searchSortMode === 'recency') {
+                filteredConversations.sort((a, b) => {
+                    const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
+                    const hasWordA = mA.sortWordCount > 0 ? 1 : 0;
+                    const hasWordB = mB.sortWordCount > 0 ? 1 : 0;
+                    if (hasWordA !== hasWordB) return hasWordB - hasWordA;
+                    return (b.modified || 0) - (a.modified || 0);
+                });
+            } else {
+                const now = Date.now() / 1000;
+                const halfLife = 3;
+                filteredConversations.sort((a, b) => {
+                    const mA = filteredMatches[a.id], mB = filteredMatches[b.id];
+                    const isPhraseA = rawSearchMatches[a.id]?.match_type === 'proximity' ? 0 : 1;
+                    const isPhraseB = rawSearchMatches[b.id]?.match_type === 'proximity' ? 0 : 1;
+                    if (isPhraseA !== isPhraseB) return isPhraseB - isPhraseA;
+                    const hasWordA = mA.sortWordCount > 0 ? 1 : 0;
+                    const hasWordB = mB.sortWordCount > 0 ? 1 : 0;
+                    if (hasWordA !== hasWordB) return hasWordB - hasWordA;
+                    const recencyA = Math.pow(2, -((now - (a.modified || 0)) / 86400) / halfLife);
+                    const recencyB = Math.pow(2, -((now - (b.modified || 0)) / 86400) / halfLife);
+                    return mB.matchScore * recencyB - mA.matchScore * recencyA;
+                });
+            }
 
             if (filteredConversations.length === 0 && Object.keys(rawSearchMatches).length > 0) {
                 container.innerHTML = '<div class="empty-state"><p>No matches with current filters</p><p style="font-size: 12px; color: #666;">Try showing agent threads</p></div>';
@@ -2265,6 +2316,7 @@
                 rawSearchMatches = {};
                 currentMatchType = 'phrase';
                 currentTokens = [];
+                renderSearchModeBar(false);
                 renderConversations(filterAgentThreads(allConversations));
                 if (currentConversation) {
                     renderMessages(allMessages);
@@ -2313,6 +2365,7 @@
 
             document.getElementById('filterBtn').style.display = 'block';
 
+            renderSearchModeBar(true);
             applySearchFilters();
         }
 
