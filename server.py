@@ -321,25 +321,51 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             title = "Untitled Conversation"
             model = ''
             entrypoint = ''
+            preview = ''
+            head_done = False
             for i, line in enumerate(f):
-                if i >= 50:
-                    break
+                if not head_done and i < 50:
+                    try:
+                        msg_data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if msg_data.get('type') == 'user':
+                        if not entrypoint:
+                            entrypoint = msg_data.get('entrypoint', '')
+                        if msg_data.get('message'):
+                            raw = extract_first_text(
+                                msg_data['message'].get('content', ''), max_len=0)
+                            if raw:
+                                collapsed, hidden = CCPeekHandler._collapse_user_text(raw)
+                                if not hidden:
+                                    if not title or title == "Untitled Conversation":
+                                        title = collapsed[:200] + (
+                                            '...' if len(collapsed) > 200 else '')
+                                    preview = collapsed[:200] + (
+                                        '...' if len(collapsed) > 200 else '')
+                    elif not model and msg_data.get('type') == 'assistant':
+                        msg = msg_data.get('message')
+                        if isinstance(msg, dict) and msg.get('model'):
+                            model = msg['model']
+                    if model and title != "Untitled Conversation" and entrypoint:
+                        head_done = True
+                    continue
+                if '"type":"user"' not in line and '"type": "user"' not in line:
+                    continue
                 try:
                     msg_data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not entrypoint and msg_data.get('type') == 'user':
-                    entrypoint = msg_data.get('entrypoint', '')
-                if not model and msg_data.get('type') == 'assistant':
-                    msg = msg_data.get('message')
-                    if isinstance(msg, dict) and msg.get('model'):
-                        model = msg['model']
-                if not title or title == "Untitled Conversation":
-                    found = CCPeekHandler._extract_title_from_line(msg_data)
-                    if found:
-                        title = found
-                if model and title != "Untitled Conversation" and entrypoint:
-                    break
+                if msg_data.get('type') != 'user' or not msg_data.get('message'):
+                    continue
+                raw = extract_first_text(
+                    msg_data['message'].get('content', ''), max_len=0)
+                if not raw:
+                    continue
+                collapsed, hidden = CCPeekHandler._collapse_user_text(raw)
+                if not hidden:
+                    preview = collapsed[:200] + (
+                        '...' if len(collapsed) > 200 else '')
 
             rel = os.path.relpath(jsonl_file, claude_dir)
             encoded = rel.split(os.sep)[0]
@@ -366,7 +392,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'path': jsonl_file,
                 'project_dir': project_dir,
                 'parent_id': parent_id,
-                'title': title,
+                'title': preview or title,
                 'is_internal': is_internal,
                 'timestamp': data.get('timestamp', ''),
                 'modified': stats.st_mtime,
@@ -416,6 +442,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
     def _read_codex_metadata(session_file, session_index, index_mtime=None):
         session_meta = None
         fallback_title = None
+        preview = ''
         model = ''
         first_user_message_pending = True
         try:
@@ -445,8 +472,10 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         if is_bootstrap:
                             continue
                         if not text.lstrip().startswith('<environment_context>'):
-                            fallback_title = text
-                            break
+                            if not fallback_title:
+                                fallback_title = text
+                            preview = text[:200] + (
+                                '...' if len(text) > 200 else '')
         except IOError:
             return None
 
@@ -469,7 +498,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             'path': session_file,
             'project_dir': session_meta.get('cwd') or '',
             'parent_id': None,
-            'title': CCPeekHandler._truncate_title(title),
+            'title': CCPeekHandler._truncate_title(preview or title),
             'is_internal': False,
             'timestamp': session_meta.get('timestamp', ''),
             'modified': stats.st_mtime,
@@ -614,6 +643,27 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     except (OSError, ValueError, OverflowError):
                         pass
 
+                preview = ''
+                c4 = conn.cursor()
+                c4.execute("""
+                    SELECT p.data FROM part p
+                    JOIN message m ON m.id = p.message_id
+                    WHERE m.session_id = ?
+                      AND json_extract(m.data, '$.role') = 'user'
+                      AND json_extract(p.data, '$.type') = 'text'
+                    ORDER BY m.time_created DESC, p.time_created DESC LIMIT 1
+                """, (sid,))
+                preview_row = c4.fetchone()
+                if preview_row:
+                    try:
+                        prev_text = json.loads(preview_row['data']).get('text', '')
+                        collapsed, hidden = CCPeekHandler._collapse_user_text(prev_text)
+                        if not hidden:
+                            preview = collapsed[:200] + (
+                                '...' if len(collapsed) > 200 else '')
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
                 conv_id = CCPeekHandler._make_conversation_id(source, sid)
                 results.append({
                     'id': conv_id,
@@ -624,7 +674,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     'parent_id': (
                         CCPeekHandler._make_conversation_id(source, row['parent_id'])
                         if row['parent_id'] else None),
-                    'title': title,
+                    'title': preview or title,
                     'is_internal': False,
                     'timestamp': ts_iso,
                     'modified': (time_updated or time_created) / 1000,

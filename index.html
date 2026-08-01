@@ -20,6 +20,7 @@
             color: #e3e3e3;
             height: 100vh;
             overflow: hidden;
+            overscroll-behavior: none;
         }
 
         /* App grid — 2-column layout */
@@ -1109,9 +1110,12 @@
 
             .main-panel { display: none; }
 
-            .messages-container { padding: 16px 12px; }
-            .message { gap: 10px; }
-            .message-avatar { width: 28px; height: 28px; font-size: 12px; }
+            .messages-container { padding: 16px 8px; }
+            .message { display: block; }
+            .message::after { content: ''; display: table; clear: both; }
+            .message-avatar { float: left; width: 24px; height: 24px; font-size: 10px; margin: 1px 8px 4px 0; }
+            .message-content { padding-right: 0; margin-top: 0; }
+            .copy-btn { display: none; }
         }
     </style>
 </head>
@@ -1561,6 +1565,8 @@
                     updateMessageSearchResults();
                 } else {
                     renderMessages(allMessages);
+                    const mc = document.getElementById('messagesContainer');
+                    mc.scrollTop = mc.scrollHeight;
                 }
             } catch (error) {
                 if (error.name === 'AbortError') return;
@@ -1691,7 +1697,7 @@
             const msg = representative.msg;
 
             const avatar = SOURCE_CONFIG[msg.source]?.avatar || 'C';
-            const timestamp = last.msg.timestamp ? new Date(last.msg.timestamp).toLocaleString() : '';
+            const timestamp = formatTimestamp(last.msg.timestamp);
 
             const contentParts = items.map(it => {
                 if (it.meta.isThinking) {
@@ -1949,7 +1955,7 @@
 
             const isTool = meta.isToolResult || meta.isToolUse;
             const content = formatContent(msg, meta, highlightTerm);
-            const timestamp = msg.timestamp ? new Date(msg.timestamp).toLocaleString() : '';
+            const timestamp = formatTimestamp(msg.timestamp);
 
             const toolStyle = 'background: transparent; font-size: 20px;';
             const [avatar, avatarStyle, cssClass] =
@@ -2000,6 +2006,10 @@
             const d = Math.floor(hr / 24);
             const remH = hr % 24;
             return remH ? `${d}d ${remH}h ago` : `${d}d ago`;
+        }
+
+        function formatTimestamp(timestamp) {
+            return timestamp ? new Date(timestamp).toLocaleString() : '';
         }
 
         function escapeHtml(text) {
@@ -2589,7 +2599,9 @@
                 }
 
                 if (!text) return;
-                markdown += `## ${heading}\n\n${text}\n\n---\n\n`;
+                const timestamp = formatTimestamp(msg.timestamp);
+                const timestampLine = timestamp ? `**Timestamp:** ${timestamp}\n\n` : '';
+                markdown += `## ${heading}\n\n${timestampLine}${text}\n\n---\n\n`;
             });
 
             markdown = markdown.replace(/(\n---\n\n)+$/, '\n');
@@ -2701,6 +2713,13 @@
             searchController.schedule(e.target.value);
         });
         window.addEventListener('resize', resizeSearchBox);
+        function updateSearchPlaceholder() {
+            searchBox.placeholder = window.matchMedia('(max-width: 600px)').matches
+                ? 'Search everything...'
+                : "Search everything... (Press '/' to focus)";
+        }
+        updateSearchPlaceholder();
+        window.addEventListener('resize', updateSearchPlaceholder);
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
