@@ -472,6 +472,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             f.seek(0)
             title = "Untitled Conversation"
             model = ''
+            effort = ''
             entrypoint = ''
             preview = ''
             head_done = False
@@ -499,6 +500,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         msg = msg_data.get('message')
                         if isinstance(msg, dict) and msg.get('model'):
                             model = msg['model']
+                            effort = msg_data.get('effort') or ''
                     if model and title != "Untitled Conversation" and entrypoint:
                         head_done = True
                     continue
@@ -551,6 +553,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'modified': last_ts or stats.st_mtime,
                 'size': stats.st_size,
                 'model': model,
+                'effort': effort,
                 'entrypoint': entrypoint,
                 '_file_mtime': stats.st_mtime,
                 '_scan_offset': CCPeekHandler._last_line_end(
@@ -600,6 +603,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         fallback_title = None
         preview = ''
         model = ''
+        effort = ''
         first_user_message_pending = True
         try:
             with open(session_file, 'r', encoding='utf-8', errors='replace') as f:
@@ -611,7 +615,9 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     if data.get('type') == 'session_meta' and not session_meta:
                         session_meta = data.get('payload') or {}
                     elif data.get('type') == 'turn_context' and not model:
-                        model = (data.get('payload') or {}).get('model', '')
+                        payload = data.get('payload') or {}
+                        model = payload.get('model', '')
+                        effort = payload.get('effort') or ''
                     elif data.get('type') == 'response_item':
                         payload = data.get('payload') or {}
                         if payload.get('type') != 'message' or payload.get('role') != 'user':
@@ -661,6 +667,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             'modified': last_ts or stats.st_mtime,
             'size': stats.st_size,
             'model': model,
+            'effort': effort,
             'entrypoint': 'sdk' if session_meta.get('source') == 'exec' else session_meta.get('source', ''),
             '_index_mtime': index_mtime,
             '_file_mtime': stats.st_mtime,
@@ -771,6 +778,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 """, (sid,))
                 model_row = c2.fetchone()
                 model = ''
+                effort = ''
                 if model_row:
                     try:
                         mdata = json.loads(model_row['data'])
@@ -778,6 +786,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         model_id = m.get('modelID', '') if isinstance(m, dict) else mdata.get('modelID', '')
                         provider_id = mdata.get('providerID', '')
                         model = f'{provider_id}/{model_id}' if provider_id and model_id else model_id
+                        effort = mdata.get('variant') or ''
                     except (json.JSONDecodeError, TypeError, AttributeError):
                         pass
 
@@ -853,6 +862,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         last_message_ms.get(sid) or time_updated or time_created) / 1000,
                     'size': 0,
                     'model': model,
+                    'effort': effort,
                     'entrypoint': '',
                     'variant_label': variant_label,
                     'variant_cli': variant_cli,

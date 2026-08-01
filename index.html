@@ -2119,7 +2119,7 @@
             document.getElementById('app').classList.remove('viewing-conv');
         }
 
-        function buildResumeCmd(source, convId, projectDir, isBackground, model, conv) {
+        function buildResumeCmd(source, convId, projectDir, isBackground, model, conv, effort) {
             let resumePart;
             if (source === 'codex') resumePart = `codex resume ${convId}`;
             else if (source === 'opencode' || source === 'mimocode') resumePart = `${(conv && conv.variant_cli) || source} -s ${convId}`;
@@ -2127,6 +2127,14 @@
             if (model) {
                 if (source === 'claude') resumePart += ` --model ${model}`;
                 else resumePart += ` -m ${model}`;
+            }
+            // Providers cache per reasoning effort, so an inherited level costs a full re-send
+            if (effort) {
+                if (source === 'claude') resumePart += ` --effort ${effort}`;
+                // unquoted: codex falls back to a raw string when the value isn't valid TOML,
+                // and inner quotes would collide with the cmd /c wrapper
+                else if (source === 'codex') resumePart += ` -c model_reasoning_effort=${effort}`;
+                else resumePart += ` --variant ${effort}`;
             }
             if (source === 'claude' && isBackground) resumePart += ' --fork-session';
             if (projectDir) {
@@ -2156,7 +2164,7 @@
             }
 
             let resumeSource = conv.source;
-            let resumeId, projectDir, isBackground, model;
+            let resumeId, projectDir, isBackground, model, effort;
             if ((conv.source === 'claude' || conv.source === 'opencode' || conv.source === 'mimocode') && conv.parent_id) {
                 label.textContent = 'Resume parent:';
                 const parentConv = allConversations.find(c => c.id === conv.parent_id);
@@ -2169,16 +2177,18 @@
                 projectDir = parentConv.project_dir || conv.project_dir;
                 isBackground = parentConv?.is_background;
                 model = parentConv.model;
+                effort = parentConv.effort;
             } else {
                 label.textContent = 'To resume:';
                 resumeId = conv.source_id;
                 projectDir = conv.project_dir;
                 isBackground = conv.is_background;
                 model = conv.model;
+                effort = conv.effort;
             }
 
             document.getElementById('resumeCmdText').textContent = buildResumeCmd(
-                resumeSource, resumeId, projectDir, isBackground, model, conv);
+                resumeSource, resumeId, projectDir, isBackground, model, conv, effort);
             bar.classList.add('show');
         }
 
