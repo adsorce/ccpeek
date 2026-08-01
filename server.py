@@ -335,20 +335,129 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                             continue
                         if not isinstance(data, dict):
                             continue
-                        ts = data.get('timestamp')
-                        if not isinstance(ts, str) or not ts:
-                            continue
-                        try:
-                            return datetime.fromisoformat(
-                                ts.replace('Z', '+00:00')).timestamp()
-                        except ValueError:
-                            continue
+                        ts = CCPeekHandler._parse_event_time(data)
+                        if ts is not None:
+                            return ts
                     if start == 0:
                         return None
                     chunk *= 4
         except OSError:
             return None
         return None
+
+    @staticmethod
+    def _parse_event_time(data):
+        ts = data.get('timestamp')
+        if not isinstance(ts, str) or not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _last_line_end(path, size, max_window=1 << 20):
+        """Offset just past the final newline, so a resumed scan never splits a record."""
+        window = 65536
+        try:
+            with open(path, 'rb') as f:
+                while window <= max_window:
+                    start = max(0, size - window)
+                    f.seek(start)
+                    buf = f.read(size - start)
+                    idx = buf.rfind(b'\n')
+                    if idx >= 0:
+                        return start + idx + 1
+                    if start == 0:
+                        return 0
+                    window *= 4
+        except OSError:
+            return 0
+        return 0
+
+    @staticmethod
+    def _claude_event_preview(data):
+        if data.get('type') != 'user' or not data.get('message'):
+            return ''
+        raw = extract_first_text(data['message'].get('content', ''), max_len=0)
+        if not raw:
+            return ''
+        collapsed, hidden = CCPeekHandler._collapse_user_text(raw)
+        if hidden:
+            return ''
+        return collapsed[:200] + ('...' if len(collapsed) > 200 else '')
+
+    @staticmethod
+    def _codex_event_preview(data):
+        if data.get('type') != 'response_item':
+            return ''
+        payload = data.get('payload') or {}
+        if payload.get('type') != 'message' or payload.get('role') != 'user':
+            return ''
+        text = CCPeekHandler._extract_codex_content_text(payload.get('content', []))
+        if not text or text.lstrip().startswith('<environment_context>'):
+            return ''
+        if CCPeekHandler._is_codex_agents_bootstrap_message(text):
+            return ''
+        return CCPeekHandler._truncate_title(
+            text[:200] + ('...' if len(text) > 200 else ''))
+
+    @staticmethod
+    def _refresh_from_append(entry, path, stats):
+        """Rebuild a cached entry from only the bytes appended since the last scan.
+
+        Returns None when the file changed in a way a delta can't describe, which
+        sends the caller back to a full parse.
+        """
+        start = entry.get('_scan_offset')
+        if not isinstance(start, int) or start <= 0:
+            return None
+        if stats.st_size < entry.get('size', 0) or stats.st_size < start:
+            return None
+        # model and entrypoint come from the head window, out of a delta's reach
+        if not entry.get('model'):
+            return None
+        if entry.get('source') == CLAUDE_SOURCE and not entry.get('entrypoint'):
+            return None
+        try:
+            with open(path, 'rb') as f:
+                f.seek(start)
+                buf = f.read(stats.st_size - start)
+        except OSError:
+            return None
+        cut = buf.rfind(b'\n')
+        if cut < 0:
+            return None
+        preview_of = (CCPeekHandler._claude_event_preview
+                      if entry.get('source') == CLAUDE_SOURCE
+                      else CCPeekHandler._codex_event_preview)
+        last_ts = None
+        preview = ''
+        for raw in buf[:cut].split(b'\n'):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            ts = CCPeekHandler._parse_event_time(data)
+            if ts is not None:
+                last_ts = ts
+            text = preview_of(data)
+            if text:
+                preview = text
+        updated = dict(entry)
+        if last_ts is not None:
+            updated['modified'] = last_ts
+        if preview:
+            updated['title'] = preview
+        updated['size'] = stats.st_size
+        updated['_file_mtime'] = stats.st_mtime
+        updated['_scan_offset'] = start + cut + 1
+        return updated
 
     @staticmethod
     def _read_claude_metadata(jsonl_file, claude_dir, project_dir_cache):
@@ -444,6 +553,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'model': model,
                 'entrypoint': entrypoint,
                 '_file_mtime': stats.st_mtime,
+                '_scan_offset': CCPeekHandler._last_line_end(
+                    jsonl_file, stats.st_size),
             }
 
     @staticmethod
@@ -553,6 +664,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             'entrypoint': 'sdk' if session_meta.get('source') == 'exec' else session_meta.get('source', ''),
             '_index_mtime': index_mtime,
             '_file_mtime': stats.st_mtime,
+            '_scan_offset': CCPeekHandler._last_line_end(
+                session_file, stats.st_size),
         }
 
     _OPENCODE_VARIANTS = [
@@ -2106,10 +2219,15 @@ def main(argv=None):
                             CLAUDE_SOURCE, Path(f).stem)
                         cached = existing_cache.get(conv_id)
                         if (cached and cached.get('_file_mtime') == mtime
-                                and cached.get('size') == stats.st_size
-                                and not cached.get('title', '').startswith('<')):
+                                and cached.get('size') == stats.st_size):
                             next_cache[conv_id] = cached
                             continue
+                        if cached:
+                            grown = CCPeekHandler._refresh_from_append(
+                                cached, f, stats)
+                            if grown:
+                                next_cache[conv_id] = grown
+                                continue
                         entry = CCPeekHandler._read_claude_metadata(f, claude_dir, pdc)
                         if entry:
                             next_cache[entry['id']] = entry
@@ -2129,6 +2247,12 @@ def main(argv=None):
                                 and cached.get('_index_mtime') == index_mtime):
                             next_cache[cached['id']] = cached
                             continue
+                        if cached and cached.get('_index_mtime') == index_mtime:
+                            grown = CCPeekHandler._refresh_from_append(
+                                cached, f, stats)
+                            if grown:
+                                next_cache[grown['id']] = grown
+                                continue
 
                         entry = CCPeekHandler._read_codex_metadata(
                             f, session_index, index_mtime=index_mtime)
