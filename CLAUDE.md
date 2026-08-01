@@ -6,6 +6,7 @@ Claude Code chat history viewer. Single-file Python server (`server.py`) serving
 
 - MiMoCode/OpenCode transcript discovery must exclude imported Claude sessions across both legacy `claude_import` rows and newer `external_import` rows keyed by `*session_id`; otherwise Claude Code chats reappear as native MiMoCode/OpenCode duplicates.
 - Sidebar conversation refresh now patches keyed `.conversation-item` nodes in place, so active search tabs can stay fresh without forcing a full sidebar DOM rebuild on each poll.
+- A conversation's `modified` is the last message time read from the transcript itself, never the file mtime. Windows leaves mtime frozen at first write while a session holds its JSONL open, which made live Codex sessions read hours stale. `_file_mtime` (private, stripped from API responses) is what the scan cache compares against; `size` is the field that actually catches appends. Everything downstream of recency, including the relevance decay, reads `modified`.
 
 ## Running
 

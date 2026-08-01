@@ -11,6 +11,7 @@ import shutil
 import re
 import hashlib
 import sqlite3 as _sqlite3
+from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse, unquote
@@ -308,6 +309,48 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
         return job_sessions
 
     @staticmethod
+    def _last_event_timestamp(path, max_tail=1 << 20):
+        # NTFS leaves mtime at first-write while a session holds the file open, so
+        # recency has to come from the content.
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        chunk = 65536
+        try:
+            with open(path, 'rb') as f:
+                while chunk <= max_tail:
+                    start = max(0, size - chunk)
+                    f.seek(start)
+                    lines = f.read().split(b'\n')
+                    if start > 0:
+                        lines = lines[1:]
+                    for raw in reversed(lines):
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            data = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if not isinstance(data, dict):
+                            continue
+                        ts = data.get('timestamp')
+                        if not isinstance(ts, str) or not ts:
+                            continue
+                        try:
+                            return datetime.fromisoformat(
+                                ts.replace('Z', '+00:00')).timestamp()
+                        except ValueError:
+                            continue
+                    if start == 0:
+                        return None
+                    chunk *= 4
+        except OSError:
+            return None
+        return None
+
+    @staticmethod
     def _read_claude_metadata(jsonl_file, claude_dir, project_dir_cache):
         with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
             first_line = f.readline()
@@ -382,6 +425,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                         CLAUDE_SOURCE, rel_parts[si - 1])
 
             source_id = os.path.basename(jsonl_file).replace('.jsonl', '')
+            last_ts = CCPeekHandler._last_event_timestamp(jsonl_file)
             conv_id = CCPeekHandler._make_conversation_id(CLAUDE_SOURCE, source_id)
             is_internal = CCPeekHandler._is_internal_thread(jsonl_file, title)
 
@@ -395,10 +439,11 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 'title': preview or title,
                 'is_internal': is_internal,
                 'timestamp': data.get('timestamp', ''),
-                'modified': stats.st_mtime,
+                'modified': last_ts or stats.st_mtime,
                 'size': stats.st_size,
                 'model': model,
                 'entrypoint': entrypoint,
+                '_file_mtime': stats.st_mtime,
             }
 
     @staticmethod
@@ -487,6 +532,7 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             return None
 
         stats = os.stat(session_file)
+        last_ts = CCPeekHandler._last_event_timestamp(session_file)
         indexed = session_index.get(source_id, {})
         title = indexed.get('thread_name') or fallback_title or 'Untitled Conversation'
         conv_id = CCPeekHandler._make_conversation_id(CODEX_SOURCE, source_id)
@@ -501,11 +547,12 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
             'title': CCPeekHandler._truncate_title(preview or title),
             'is_internal': False,
             'timestamp': session_meta.get('timestamp', ''),
-            'modified': stats.st_mtime,
+            'modified': last_ts or stats.st_mtime,
             'size': stats.st_size,
             'model': model,
             'entrypoint': 'sdk' if session_meta.get('source') == 'exec' else session_meta.get('source', ''),
             '_index_mtime': index_mtime,
+            '_file_mtime': stats.st_mtime,
         }
 
     _OPENCODE_VARIANTS = [
@@ -587,6 +634,18 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                 ORDER BY s.time_updated DESC
             """)
             sessions = c.fetchall()
+
+            # session.time_updated is a row touch, not message activity
+            last_message_ms = {}
+            try:
+                c.execute("""
+                    SELECT session_id, MAX(MAX(time_created, time_updated)) AS last_ms
+                    FROM message GROUP BY session_id
+                """)
+                last_message_ms = {r['session_id']: r['last_ms'] for r in c.fetchall()}
+            except _sqlite3.Error:
+                pass
+
             for row in sessions:
                 sid = row['id']
                 if sid in imported_session_ids:
@@ -677,7 +736,8 @@ class CCPeekHandler(SimpleHTTPRequestHandler):
                     'title': preview or title,
                     'is_internal': False,
                     'timestamp': ts_iso,
-                    'modified': (time_updated or time_created) / 1000,
+                    'modified': (
+                        last_message_ms.get(sid) or time_updated or time_created) / 1000,
                     'size': 0,
                     'model': model,
                     'entrypoint': '',
@@ -2045,7 +2105,7 @@ def main(argv=None):
                         conv_id = CCPeekHandler._make_conversation_id(
                             CLAUDE_SOURCE, Path(f).stem)
                         cached = existing_cache.get(conv_id)
-                        if (cached and cached['modified'] == mtime
+                        if (cached and cached.get('_file_mtime') == mtime
                                 and cached.get('size') == stats.st_size
                                 and not cached.get('title', '').startswith('<')):
                             next_cache[conv_id] = cached
@@ -2064,7 +2124,7 @@ def main(argv=None):
                     try:
                         stats = os.stat(f)
                         cached = cached_codex_by_path.get(f)
-                        if (cached and cached.get('modified') == stats.st_mtime
+                        if (cached and cached.get('_file_mtime') == stats.st_mtime
                                 and cached.get('size') == stats.st_size
                                 and cached.get('_index_mtime') == index_mtime):
                             next_cache[cached['id']] = cached

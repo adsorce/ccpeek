@@ -1334,7 +1334,7 @@
                     </div>
                     ${hasMatches && snippet ? `<div class="match-snippet">${searchTerm ? highlightSidebar(escapeHtml(snippet), matchData) : escapeHtml(snippet)}</div>` : ''}
                     <div class="conversation-meta">
-                        <span>${dateStr}</span>
+                        <span class="conv-time">${dateStr}</span>
                         ${(() => { const f = folderName(conv.project_dir); return f ? `<span class="folder-pill${folderFilter === f ? ' active' : ''}" onclick="toggleFolderFilter('${f.replace(/'/g, "\\'")}', event)" title="${escapeHtml(conv.project_dir)}">${escapeHtml(f)}</span>` : ''; })()}
                         ${hasMatches ? `<span class="match-count" style="margin-left:auto">${matchLabel}</span>` : ''}
                     </div>
@@ -1417,6 +1417,7 @@
                 const markup = buildConversationItemMarkup(conv, searchMatches);
                 const next = createConversationItem(markup);
                 next._stableKey = stableKey;
+                next._modified = conv.modified;
                 if (existing) {
                     existing.replaceWith(next);
                 }
@@ -2779,6 +2780,17 @@
                 setTimeout(() => help.classList.remove('show'), 5000);
             }
         });
+
+        // Reused sidebar nodes keep their original label, so tick them separately
+        function refreshRelativeTimes() {
+            document.querySelectorAll('.conversation-item').forEach(el => {
+                const span = el.querySelector('.conv-time');
+                if (span && el._modified) {
+                    span.textContent = formatRelativeTime(el._modified * 1000);
+                }
+            });
+        }
+        setInterval(refreshRelativeTimes, 30000);
 
         setInterval(async () => {
             const container = document.getElementById('conversationsList');
