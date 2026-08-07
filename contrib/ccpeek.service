@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/ccpeek/ccpeek --no-browser --port 8888
+ExecStart=%h/.local/bin/ccpeek --no-browser --port 8888
 Restart=on-failure
 RestartSec=5
 

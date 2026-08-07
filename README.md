@@ -109,9 +109,10 @@ This will:
 When running inside WSL2, ccpeek automatically detects the environment and opens your default **Windows** browser via `cmd.exe /c start` instead of `xdg-open`, which avoids silent failures caused by the lack of a controlling TTY in background/daemon contexts.
 
 ### Running as a systemd Service
-If you'd like ccpeek always available at `http://localhost:8888` (great for bookmarking), install it as a systemd user service:
+If you'd like ccpeek always available at `http://localhost:8888` (great for bookmarking), install it as a systemd user service. The service unit expects `ccpeek` to be symlinked at `~/.local/bin/ccpeek`, so create the symlink first if you haven't:
 
 ```bash
+ln -sf $(pwd)/ccpeek ~/.local/bin/ccpeek
 cp contrib/ccpeek.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ccpeek.service
@@ -149,15 +150,19 @@ All styles are contained in `index.html`. Look for the `<style>` section to cust
 ## 🐛 Troubleshooting
 
 ### "Permission denied" when running ccpeek
-Make sure the scripts are executable:
+Make sure the scripts are executable (run from the repo directory):
 ```bash
-chmod +x ~/ccpeek/ccpeek ~/ccpeek/server.py
+chmod +x ccpeek server.py
 ```
 
 ### "Command not found: ccpeek"
-The symlink might not be created. Run:
+The symlink might not be created. From the repo directory, run:
 ```bash
-sudo ln -sf ~/ccpeek/ccpeek /usr/local/bin/ccpeek
+sudo ln -sf $(pwd)/ccpeek /usr/local/bin/ccpeek
+```
+Or, to avoid sudo, symlink into `~/.local/bin` (make sure it's on your `PATH`):
+```bash
+ln -sf $(pwd)/ccpeek ~/.local/bin/ccpeek
 ```
 
 ### Port already in use

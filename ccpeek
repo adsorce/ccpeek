@@ -2,8 +2,8 @@
 import os
 import sys
 
-# Add the ccpeek directory to path
-sys.path.insert(0, os.path.expanduser('~/ccpeek'))
+# Add the ccpeek directory to path (resolve symlinks so it works from any install location)
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
 # Import and run the server
 from server import main
